@@ -1368,6 +1368,11 @@ public class Wallet {
         .setValue(dbManager.getDynamicPropertiesStore().getAllowStrictMath())
         .build());
 
+    builder.addChainParameter(Protocol.ChainParameters.ChainParameter.newBuilder()
+        .setKey("getConsensusLogicOptimization")
+        .setValue(dbManager.getDynamicPropertiesStore().getConsensusLogicOptimization())
+        .build());
+
     return builder.build();
   }
 
