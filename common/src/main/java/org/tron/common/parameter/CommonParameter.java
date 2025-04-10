@@ -500,7 +500,7 @@ public class CommonParameter {
   public int jsonRpcMaxBlockRange = 5000;
   @Getter
   @Setter
-  public int jsonRpcMaxSubTopics = 1000;
+  public int jsonRpcMaxSubTopics = 10000;
 
   @Getter
   @Setter
