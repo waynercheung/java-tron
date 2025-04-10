@@ -80,9 +80,12 @@ public class LogMatch {
 
   public LogFilterElement[] matchBlockOneByOne()
       throws BadItemException, ItemNotFoundException, JsonRpcTooManyResultException {
+    long functionStartTime = System.nanoTime(); // 记录函数开始时间
     List<LogFilterElement> logFilterElementList = new ArrayList<>();
 
     for (long blockNum : blockNumList) {
+      long loopStartTime = System.nanoTime(); // 记录循环开始时间
+
       TransactionRetCapsule transactionRetCapsule =
           manager.getTransactionRetStore()
               .getTransactionInfoByBlockNum(ByteArray.fromLong(blockNum));
@@ -95,17 +98,31 @@ public class LogMatch {
       List<TransactionInfo> transactionInfoList = transactionRet.getTransactioninfoList();
 
       String blockHash = manager.getChainBaseManager().getBlockIdByNum(blockNum).toString();
+      long matchBlockStartTime = System.nanoTime(); // 记录 matchBlock 开始时间
       List<LogFilterElement> matchedLog = matchBlock(logFilterWrapper.getLogFilter(), blockNum,
           blockHash, transactionInfoList, false);
+      long matchBlockEndTime = System.nanoTime(); // 记录 matchBlock 结束时间
+      logger.info("Execution time for matchBlock (blockNum: {}): {} ms", blockNum,
+          (matchBlockEndTime - matchBlockStartTime) / 1_000_000);
       if (!matchedLog.isEmpty()) {
         logFilterElementList.addAll(matchedLog);
       }
 
-      if (logFilterElementList.size() > LogBlockQuery.MAX_RESULT) {
+      if (logFilterElementList.size() > LogBlockQuery.MAX_RESULT) {long loopEndTime = System.nanoTime(); // 记录循环结束时间
+        logger.info("Execution time for blockNum {}: {} ms", blockNum,
+            (loopEndTime - loopStartTime) / 1_000_000);
+
         throw new JsonRpcTooManyResultException(
             "query returned more than " + LogBlockQuery.MAX_RESULT + " results");
       }
+
+      long loopEndTime = System.nanoTime(); // 记录循环结束时间
+      logger.info("Execution time for blockNum {}: {} ms", blockNum,
+          (loopEndTime - loopStartTime) / 1_000_000);
     }
+
+    long functionEndTime = System.nanoTime(); // 记录函数结束时间
+    logger.info("Total execution time for matchBlockOneByOne: {} ms", (functionEndTime - functionStartTime) / 1_000_000);
 
     return logFilterElementList.toArray(new LogFilterElement[0]);
   }

@@ -39,27 +39,27 @@ public class LogBlockQuery {
     this.currentMaxBlockNum = currentMaxBlockNum;
 
     if (logFilterWrapper.getFromBlock() == Long.MAX_VALUE) {
-      minSection = (int) (currentMaxBlockNum / Bloom.BLOOM_BIT_SIZE);
       minBlock = currentMaxBlockNum;
     } else {
-      minSection = (int) (logFilterWrapper.getFromBlock() / Bloom.BLOOM_BIT_SIZE);
       minBlock = logFilterWrapper.getFromBlock();
     }
+    minSection = (int) (minBlock / Bloom.BLOOM_BIT_SIZE);
 
     if (logFilterWrapper.getToBlock() == Long.MAX_VALUE) {
-      maxSection = (int) (currentMaxBlockNum / Bloom.BLOOM_BIT_SIZE);
       maxBlock = currentMaxBlockNum;
     } else {
-      maxSection = (int) (logFilterWrapper.getToBlock() / Bloom.BLOOM_BIT_SIZE);
       maxBlock = logFilterWrapper.getToBlock();
       if (maxBlock > currentMaxBlockNum) {
         maxBlock = currentMaxBlockNum;
       }
     }
+    maxSection = (int) (maxBlock / Bloom.BLOOM_BIT_SIZE);
   }
 
   public List<Long> getPossibleBlock() throws ExecutionException, InterruptedException,
       JsonRpcTooManyResultException {
+    long allStartTime = System.nanoTime(); // 记录循环开始时间
+
     List<Long> blockNumList = new ArrayList<>();
     if (minBlock > currentMaxBlockNum) {
       return blockNumList;
@@ -71,9 +71,16 @@ public class LogBlockQuery {
     BitSet blockNumBitSet = new BitSet(capacity);
     blockNumBitSet.set(0, capacity);
 
-    //works serial
+    logger.info("allConditionsIndex: {}", (Object) allConditionsIndex); // Print allConditionsIndex
+    // works serial
     for (int[][] conditionsIndex : allConditionsIndex) {
+      logger.info("conditionsIndex: {}", (Object) conditionsIndex); // Print each conditionsIndex
+
+      long startTime = System.nanoTime(); // Start time for subMatch
       BitSet bitSet = subMatch(conditionsIndex);
+      long endTime = System.nanoTime(); // End time for subMatch
+
+      logger.info("subMatch execution time: {} ms", (endTime - startTime) / 1_000_000); // Print execution time
       blockNumBitSet.and(bitSet);
     }
 
@@ -87,6 +94,9 @@ public class LogBlockQuery {
         blockNumList.add(blockNum);
       }
     }
+
+    long allEndTime = System.nanoTime();
+    logger.info("getPossibleBlock execution time: {} ms", (allEndTime - allStartTime) / 1_000_000); // Print execution time
 
     if (blockNumList.size() >= MAX_RESULT) {
       throw new JsonRpcTooManyResultException(
@@ -129,6 +139,8 @@ public class LogBlockQuery {
    */
   private BitSet partialMatch(final int[][] bitIndexes, int section)
       throws ExecutionException, InterruptedException {
+    long startTime = System.nanoTime(); // Start time for the entire function
+
     List<List<Future<BitSet>>> bitSetList = new ArrayList<>();
 
     for (int[] index : bitIndexes) {
@@ -140,6 +152,9 @@ public class LogBlockQuery {
       }
       bitSetList.add(futureList);
     }
+
+    long stepEndTime = System.nanoTime(); // End time for this step
+    logger.info("partialMatch-sectionBloomStore.get execution time: {} ms", (stepEndTime - startTime) / 1_000_000); // Log step time
 
     BitSet bitSet = new BitSet(SectionBloomStore.BLOCK_PER_SECTION);
 
@@ -160,6 +175,13 @@ public class LogBlockQuery {
       // "or" condition in first dimension
       bitSet.or(subBitSet);
     }
+
+    long stepEndTime2 = System.nanoTime(); // End time for this step
+    logger.info("partialMatch-bitSet execution time: {} ms", (stepEndTime2 - stepEndTime) / 1_000_000); // Log step time
+
+    long endTime = System.nanoTime(); // End time for the entire function
+    logger.info("partialMatch execution time: {} ms", (endTime - startTime) / 1_000_000); // Log total time
+
     return bitSet;
   }
 
