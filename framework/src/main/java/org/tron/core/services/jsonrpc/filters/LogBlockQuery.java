@@ -139,6 +139,7 @@ public class LogBlockQuery {
    */
   private BitSet partialMatch(final int[][] bitIndexes, int section)
       throws ExecutionException, InterruptedException {
+    logger.info("partialMatch for bitIndexes: {}", (Object) bitIndexes); // Print bitIndexes
     long startTime = System.nanoTime(); // Start time for the entire function
 
     List<List<Future<BitSet>>> bitSetList = new ArrayList<>();
@@ -152,6 +153,8 @@ public class LogBlockQuery {
       }
       bitSetList.add(futureList);
     }
+
+    logger.info("partialMatch-bitSetList.size: {}", bitSetList.size()); // Print bitSetList
 
     long stepEndTime = System.nanoTime(); // End time for this step
     logger.info("partialMatch-sectionBloomStore.get execution time: {} ms", (stepEndTime - startTime) / 1_000_000); // Log step time
