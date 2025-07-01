@@ -125,7 +125,7 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
             e -> !keys.contains(WrappedByteArray.of(e.getKey()))));
   }
 
-  synchronized void collect(Map<WrappedByteArray, WrappedByteArray> all) {
+  void collect(Map<WrappedByteArray, WrappedByteArray> all) {
     Snapshot next = getRoot().getNext();
     while (next != null) {
       Streams.stream(((SnapshotImpl) next).db)
