@@ -16,7 +16,10 @@ import org.tron.core.Wallet;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.db2.core.Chainbase.Cursor;
+import org.tron.core.exception.ItemNotFoundException;
 import org.tron.core.exception.jsonrpc.JsonRpcExceedLimitException;
+import org.tron.core.exception.jsonrpc.JsonRpcInvalidParamsException;
+import org.tron.core.exception.jsonrpc.JsonRpcMethodNotFoundException;
 import org.tron.core.services.NodeInfoService;
 import org.tron.core.services.jsonrpc.TronJsonRpc.FilterRequest;
 import org.tron.core.services.jsonrpc.TronJsonRpcImpl;
@@ -56,6 +59,45 @@ public class WalletCursorTest extends BaseTest {
             10000_000_000L);
     dbManager.getAccountStore().put(accountCapsule.getAddress().toByteArray(), accountCapsule);
     init = true;
+  }
+
+  @Test
+  public void testNullParameterChecksRespectRequestSource() throws Exception {
+    TronJsonRpcImpl tronJsonRpc = new TronJsonRpcImpl(nodeInfoService, wallet);
+    tronJsonRpc.setManager(dbManager);
+
+    try {
+      dbManager.setCursor(Cursor.SOLIDITY);
+      Assert.assertThrows(JsonRpcInvalidParamsException.class,
+          () -> tronJsonRpc.newFilter(null));
+      Assert.assertThrows(JsonRpcInvalidParamsException.class,
+          () -> tronJsonRpc.getLogs(null));
+      Assert.assertFalse(tronJsonRpc.uninstallFilter(null));
+      Assert.assertThrows(ItemNotFoundException.class,
+          () -> tronJsonRpc.getFilterChanges(null));
+      Assert.assertThrows(ItemNotFoundException.class,
+          () -> tronJsonRpc.getFilterLogs(null));
+      Assert.assertThrows(JsonRpcMethodNotFoundException.class,
+          () -> tronJsonRpc.buildTransaction(null));
+
+      dbManager.resetCursor();
+      dbManager.setCursor(Cursor.PBFT);
+      Assert.assertThrows(JsonRpcMethodNotFoundException.class,
+          () -> tronJsonRpc.newFilter(null));
+      Assert.assertThrows(JsonRpcMethodNotFoundException.class,
+          () -> tronJsonRpc.getLogs(null));
+      Assert.assertThrows(JsonRpcMethodNotFoundException.class,
+          () -> tronJsonRpc.uninstallFilter(null));
+      Assert.assertThrows(JsonRpcMethodNotFoundException.class,
+          () -> tronJsonRpc.getFilterChanges(null));
+      Assert.assertThrows(JsonRpcMethodNotFoundException.class,
+          () -> tronJsonRpc.getFilterLogs(null));
+      Assert.assertThrows(JsonRpcMethodNotFoundException.class,
+          () -> tronJsonRpc.buildTransaction(null));
+    } finally {
+      dbManager.resetCursor();
+      tronJsonRpc.close();
+    }
   }
 
   @Test
