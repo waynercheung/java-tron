@@ -36,6 +36,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -193,6 +194,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
   private final ExecutorService sectionExecutor;
   private final NodeInfoService nodeInfoService;
   private final Wallet wallet;
+  private final AtomicBoolean chainIdentityLookupFailed = new AtomicBoolean();
   @Autowired
   private Manager manager;
   private final String esName = "query-section";
@@ -424,9 +426,21 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     // return hash of genesis block
     try {
       byte[] chainId = wallet.getBlockCapsuleByNum(0).getBlockId().getBytes();
-      return ByteArray.toJsonHex(Arrays.copyOfRange(chainId, chainId.length - 4, chainId.length));
+      String result = ByteArray.toJsonHex(
+          Arrays.copyOfRange(chainId, chainId.length - 4, chainId.length));
+      if (chainIdentityLookupFailed.compareAndSet(true, false)) {
+        logger.info("Chain identity lookup recovered");
+      }
+      return result;
     } catch (Exception e) {
-      throw new JsonRpcInternalException(e.getMessage());
+      // Mapped errors bypass the resolver's unhandled-exception log, so record the complete
+      // cause once per failure episode at the lookup boundary.
+      if (chainIdentityLookupFailed.compareAndSet(false, true)) {
+        logger.warn("Chain identity lookup failed", e);
+      }
+      // Keep the cause so the resolver can still find a fatal error wrapped in an exception,
+      // and carry the public message on the exception itself rather than the underlying one.
+      throw new JsonRpcInternalException("Chain identity unavailable", e);
     }
   }
 

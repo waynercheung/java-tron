@@ -4,11 +4,14 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,10 +19,12 @@ import com.googlecode.jsonrpc4j.JsonRpcServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpServletResponseWrapper;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -41,9 +46,7 @@ public class JsonRpcServletTest {
   public void setUp() throws Exception {
     servlet = new TestableServlet();
     mockRpcServer = mock(JsonRpcServer.class);
-    Field f = JsonRpcServlet.class.getDeclaredField("rpcServer");
-    f.setAccessible(true);
-    f.set(servlet, mockRpcServer);
+    servlet.setRpcServer(mockRpcServer);
     savedMaxBatchSize = CommonParameter.getInstance().jsonRpcMaxBatchSize;
     savedMaxResponseSize = CommonParameter.getInstance().jsonRpcMaxResponseSize;
   }
@@ -121,6 +124,175 @@ public class JsonRpcServletTest {
   }
 
   @Test
+  public void invalidRequestIdTypes_returnInvalidRequestWithoutDispatch() throws Exception {
+    String[] invalidIds = {"true", "{}", "[]"};
+
+    for (String id : invalidIds) {
+      MockHttpServletResponse resp = doPost(
+          "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\","
+              + "\"params\":[],\"id\":" + id + "}");
+      assertEquals(200, resp.getStatus());
+      assertEquals("application/json-rpc", resp.getContentType());
+      assertInvalidRequestWithNullId(MAPPER.readTree(resp.getContentAsByteArray()));
+    }
+
+    verifyNoInteractions(mockRpcServer);
+  }
+
+  @Test
+  public void nullRequestId_isNotRejectedByServletValidation() throws Exception {
+    int[] callCount = {0};
+    doAnswer(inv -> {
+      callCount[0]++;
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    doPost("{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\","
+        + "\"params\":[],\"id\":null}");
+
+    assertEquals("a null id is valid JSON-RPC input and must reach dispatch", 1, callCount[0]);
+  }
+
+  @Test
+  public void structuredAndAbsentParams_reachRpcServer() throws Exception {
+    List<JsonNode> dispatchedRequests = new ArrayList<>();
+    doAnswer(inv -> {
+      dispatchedRequests.add(MAPPER.readTree((InputStream) inv.getArgument(0)));
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    String[] requests = {
+        "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\",\"id\":1}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\","
+            + "\"params\":null,\"id\":2}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\","
+            + "\"params\":[],\"id\":3}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\","
+            + "\"params\":{},\"id\":4}"
+    };
+    for (String request : requests) {
+      doPost(request);
+    }
+
+    assertEquals("all supported params shapes must reach jsonrpc4j",
+        requests.length, dispatchedRequests.size());
+    for (int i = 0; i < requests.length; i++) {
+      assertEquals("forwarded request must be unchanged at index " + i,
+          MAPPER.readTree(requests[i]), dispatchedRequests.get(i));
+    }
+  }
+
+  @Test
+  public void singleScalarParams_isRejectedBeforeDispatch() throws Exception {
+    MockHttpServletResponse resp = doPost(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\","
+            + "\"params\":5,\"id\":42}");
+
+    assertEquals(200, resp.getStatus());
+    assertEquals("application/json-rpc", resp.getContentType());
+    JsonNode body = MAPPER.readTree(resp.getContentAsByteArray());
+    assertEquals(MAPPER.getNodeFactory().textNode("2.0"), body.get("jsonrpc"));
+    assertEquals(MAPPER.getNodeFactory().numberNode(-32600),
+        body.get("error").get("code"));
+    assertEquals(MAPPER.getNodeFactory().textNode("Invalid Request"),
+        body.get("error").get("message"));
+    assertFalse(body.get("error").has("data"));
+    assertEquals(MAPPER.getNodeFactory().numberNode(42), body.get("id"));
+    verifyNoInteractions(mockRpcServer);
+  }
+
+  @Test
+  public void batchInvalidRequestId_isIsolatedFromValidSiblings() throws Exception {
+    int[] callCount = {0};
+    doAnswer(inv -> {
+      JsonNode request = MAPPER.readTree((InputStream) inv.getArgument(0));
+      OutputStream out = inv.getArgument(1);
+      out.write(("{\"jsonrpc\":\"2.0\",\"result\":\"ok\",\"id\":"
+          + request.get("id") + "}").getBytes(StandardCharsets.UTF_8));
+      callCount[0]++;
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    MockHttpServletResponse resp = doPost("["
+        + "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\",\"params\":[],\"id\":1},"
+        + "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\",\"params\":[],\"id\":true},"
+        + "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\",\"params\":[],\"id\":\"two\"}"
+        + "]");
+
+    assertEquals(200, resp.getStatus());
+    JsonNode body = MAPPER.readTree(resp.getContentAsByteArray());
+    assertTrue(body.isArray());
+    assertEquals(3, body.size());
+    assertEquals("ok", body.get(0).get("result").asText());
+    assertEquals(1, body.get(0).get("id").asInt());
+    assertInvalidRequestWithNullId(body.get(1));
+    assertEquals("ok", body.get(2).get("result").asText());
+    assertEquals("two", body.get(2).get("id").asText());
+    assertEquals("only valid requests should reach jsonrpc4j", 2, callCount[0]);
+  }
+
+  @Test
+  public void batchScalarParams_isIsolatedFromValidSibling() throws Exception {
+    int[] callCount = {0};
+    JsonNode[] dispatchedRequest = {null};
+    doAnswer(inv -> {
+      dispatchedRequest[0] = MAPPER.readTree((InputStream) inv.getArgument(0));
+      OutputStream out = inv.getArgument(1);
+      out.write(("{\"jsonrpc\":\"2.0\",\"result\":\"ok\",\"id\":"
+          + dispatchedRequest[0].get("id") + "}").getBytes(StandardCharsets.UTF_8));
+      callCount[0]++;
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    MockHttpServletResponse resp = doPost("["
+        + "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\",\"params\":5,\"id\":1},"
+        + "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\",\"params\":[],\"id\":2}"
+        + "]");
+
+    assertEquals(200, resp.getStatus());
+    JsonNode body = MAPPER.readTree(resp.getContentAsByteArray());
+    assertTrue(body.isArray());
+    assertEquals(2, body.size());
+    assertEquals(MAPPER.getNodeFactory().numberNode(-32600),
+        body.get(0).get("error").get("code"));
+    assertEquals(MAPPER.getNodeFactory().textNode("Invalid Request"),
+        body.get(0).get("error").get("message"));
+    assertFalse(body.get(0).get("error").has("data"));
+    assertEquals(MAPPER.getNodeFactory().numberNode(1), body.get(0).get("id"));
+    assertEquals(MAPPER.getNodeFactory().textNode("ok"), body.get(1).get("result"));
+    assertEquals(MAPPER.getNodeFactory().numberNode(2), body.get(1).get("id"));
+    assertEquals("only the valid sibling should reach jsonrpc4j", 1, callCount[0]);
+    assertEquals(MAPPER.getNodeFactory().numberNode(2), dispatchedRequest[0].get("id"));
+    assertTrue(dispatchedRequest[0].get("params").isArray());
+  }
+
+  @Test
+  public void batchScalarParamsWithoutId_returnsErrorAndDispatchesValidNotification()
+      throws Exception {
+    List<JsonNode> dispatchedRequests = new ArrayList<>();
+    doAnswer(inv -> {
+      dispatchedRequests.add(MAPPER.readTree((InputStream) inv.getArgument(0)));
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    MockHttpServletResponse resp = doPost("["
+        + "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\",\"params\":5},"
+        + "{\"jsonrpc\":\"2.0\",\"method\":\"web3_clientVersion\",\"params\":[]}"
+        + "]");
+
+    assertEquals(200, resp.getStatus());
+    assertEquals("application/json-rpc", resp.getContentType());
+    JsonNode body = MAPPER.readTree(resp.getContentAsByteArray());
+    assertTrue(body.isArray());
+    assertEquals(1, body.size());
+    assertInvalidRequestWithNullId(body.get(0));
+    assertEquals("only the valid notification should reach jsonrpc4j",
+        1, dispatchedRequests.size());
+    assertFalse(dispatchedRequests.get(0).has("id"));
+    assertTrue(dispatchedRequests.get(0).get("params").isArray());
+  }
+
+  @Test
   public void batchLimitDisabled_largeBatchAllowed() throws Exception {
     CommonParameter.getInstance().jsonRpcMaxBatchSize = 0;
     // write nothing — simulates notifications (no response expected)
@@ -142,28 +314,119 @@ public class JsonRpcServletTest {
     assertEquals("", resp.getContentAsString());
   }
 
-  // --- rpcServer.handle exceptions ---
+  // --- rpcServer.handleRequest exceptions ---
 
   @Test
   public void rpcServerThrowsRuntimeException_returnsInternalError() throws Exception {
     doThrow(new RuntimeException("server exploded")).when(mockRpcServer)
-        .handle(any(HttpServletRequest.class), any(HttpServletResponse.class));
+        .handleRequest(any(InputStream.class), any(OutputStream.class));
     MockHttpServletResponse resp = doPost("{\"method\":\"eth_blockNumber\",\"id\":42}");
     assertEquals(200, resp.getStatus());
     JsonNode body = MAPPER.readTree(resp.getContentAsString());
     assertFalse(body.isArray());
     assertEquals(-32603, body.get("error").get("code").asInt());
+    assertEquals("Internal error", body.get("error").get("message").asText());
+    assertEquals(42, body.get("id").asInt());
+  }
+
+  @Test
+  public void rpcServerThrowsIOException_returnsInternalError() throws Exception {
+    doThrow(new IOException("server exploded")).when(mockRpcServer)
+        .handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    MockHttpServletResponse resp = doPost("{\"method\":\"eth_blockNumber\",\"id\":42}");
+
+    assertEquals(200, resp.getStatus());
+    JsonNode body = MAPPER.readTree(resp.getContentAsByteArray());
+    assertEquals(-32603, body.get("error").get("code").asInt());
+    assertEquals("Internal error", body.get("error").get("message").asText());
+    assertEquals(42, body.get("id").asInt());
+  }
+
+  @Test
+  public void notificationIOException_returnsEmptyResponse() throws Exception {
+    doThrow(new IOException("server exploded")).when(mockRpcServer)
+        .handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    MockHttpServletResponse resp = doPost("{\"method\":\"eth_blockNumber\"}");
+
+    assertEquals(200, resp.getStatus());
+    assertEquals("application/json-rpc", resp.getContentType());
+    assertEquals(0, resp.getContentAsByteArray().length);
   }
 
   @Test
   public void batchRpcServerThrows_internalErrorIsArray() throws Exception {
     doThrow(new RuntimeException("boom")).when(mockRpcServer)
         .handleRequest(any(InputStream.class), any(OutputStream.class));
-    MockHttpServletResponse resp = doPost("[{\"method\":\"eth_blockNumber\"}]");
+    MockHttpServletResponse resp = doPost(
+        "[{\"method\":\"eth_blockNumber\",\"id\":\"request-1\"}]");
     assertEquals(200, resp.getStatus());
     JsonNode body = MAPPER.readTree(resp.getContentAsString());
     assertTrue("batch internal error must be an array", body.isArray());
     assertEquals(-32603, body.get(0).get("error").get("code").asInt());
+    assertEquals("Internal error", body.get(0).get("error").get("message").asText());
+    assertEquals("request-1", body.get(0).get("id").asText());
+  }
+
+  @Test
+  public void batchRpcServerThrowsIOException_internalErrorIsArray() throws Exception {
+    doThrow(new IOException("boom")).when(mockRpcServer)
+        .handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    MockHttpServletResponse resp = doPost(
+        "[{\"method\":\"eth_blockNumber\",\"id\":\"request-1\"}]");
+
+    assertEquals(200, resp.getStatus());
+    JsonNode body = MAPPER.readTree(resp.getContentAsByteArray());
+    assertTrue(body.isArray());
+    assertEquals(-32603, body.get(0).get("error").get("code").asInt());
+    assertEquals("Internal error", body.get(0).get("error").get("message").asText());
+    assertEquals("request-1", body.get(0).get("id").asText());
+  }
+
+  @Test
+  public void fatalError_commitsBare500AndRethrowsOriginal() throws Exception {
+    StackOverflowError fatal = new StackOverflowError("fatal-marker");
+    doThrow(fatal).when(mockRpcServer)
+        .handleRequest(any(InputStream.class), any(OutputStream.class));
+    MockHttpServletResponse response = new MockHttpServletResponse();
+
+    StackOverflowError thrown = assertThrows(StackOverflowError.class,
+        () -> doPost("{\"method\":\"eth_blockNumber\",\"id\":1}", response));
+
+    assertSame(fatal, thrown);
+    assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, response.getStatus());
+    assertEquals(0, response.getContentAsByteArray().length);
+    assertTrue(response.isCommitted());
+  }
+
+  @Test
+  public void cleanupIOException_doesNotReplaceOriginalFatalError() throws Exception {
+    assertCleanupFailureDoesNotReplaceFatal(new IOExceptionOnFlushResponse());
+  }
+
+  @Test
+  public void cleanupError_doesNotReplaceOriginalFatalError() throws Exception {
+    assertCleanupFailureDoesNotReplaceFatal(new ErrorOnFlushResponse());
+  }
+
+  @Test
+  public void batchMalformedRpcServerResponse_preservesRequestId() throws Exception {
+    doAnswer(inv -> {
+      OutputStream out = inv.getArgument(1);
+      out.write("not-json".getBytes(StandardCharsets.UTF_8));
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    MockHttpServletResponse resp = doPost(
+        "[{\"method\":\"eth_blockNumber\",\"id\":42}]");
+
+    JsonNode body = MAPPER.readTree(resp.getContentAsByteArray());
+    assertTrue(body.isArray());
+    assertEquals(-32603, body.get(0).get("error").get("code").asInt());
+    assertEquals("Internal error", body.get(0).get("error").get("message").asText());
+    assertEquals(42, body.get(0).get("id").asInt());
   }
 
   // --- response size limit ---
@@ -173,10 +436,10 @@ public class JsonRpcServletTest {
     int limit = 50;
     CommonParameter.getInstance().jsonRpcMaxResponseSize = limit;
     doAnswer(inv -> {
-      HttpServletResponse r = inv.getArgument(1);
-      r.getOutputStream().write(new byte[limit + 1]);
-      return null;
-    }).when(mockRpcServer).handle(any(HttpServletRequest.class), any(HttpServletResponse.class));
+      OutputStream out = inv.getArgument(1);
+      out.write(new byte[limit + 1]);
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
 
     MockHttpServletResponse resp = doPost("{\"method\":\"eth_getLogs\",\"id\":1}");
     assertEquals(200, resp.getStatus());
@@ -233,16 +496,42 @@ public class JsonRpcServletTest {
     assertEquals("third sub-request must not be executed after overflow", 2, callCount[0]);
   }
 
+  @Test
+  public void batchInvalidRequestId_afterOverflowStillReturnsInvalidRequest() throws Exception {
+    int limit = 50;
+    CommonParameter.getInstance().jsonRpcMaxResponseSize = limit;
+    int[] callCount = {0};
+    doAnswer(inv -> {
+      OutputStream out = inv.getArgument(1);
+      out.write(new byte[limit + 1]);
+      callCount[0]++;
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    MockHttpServletResponse resp = doPost("["
+        + "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getLogs\",\"id\":1},"
+        + "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getLogs\",\"id\":{}}"
+        + "]");
+
+    JsonNode body = MAPPER.readTree(resp.getContentAsByteArray());
+    assertTrue(body.isArray());
+    assertEquals(2, body.size());
+    assertEquals(-32003, body.get(0).get("error").get("code").asInt());
+    assertEquals(1, body.get(0).get("id").asInt());
+    assertInvalidRequestWithNullId(body.get(1));
+    assertEquals("invalid requests must not be dispatched after overflow", 1, callCount[0]);
+  }
+
   // --- normal path ---
 
   @Test
   public void normalRequest_commitsRpcServerResponse() throws Exception {
     byte[] rpcResp = "{\"result\":\"0x1\"}".getBytes(StandardCharsets.UTF_8);
     doAnswer(inv -> {
-      HttpServletResponse r = inv.getArgument(1);
-      r.getOutputStream().write(rpcResp);
-      return null;
-    }).when(mockRpcServer).handle(any(HttpServletRequest.class), any(HttpServletResponse.class));
+      OutputStream out = inv.getArgument(1);
+      out.write(rpcResp);
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
 
     MockHttpServletResponse resp = doPost("{\"method\":\"eth_blockNumber\",\"id\":1}");
     assertEquals(200, resp.getStatus());
@@ -417,12 +706,62 @@ public class JsonRpcServletTest {
 
   // --- helpers ---
 
+  private static void assertInvalidRequestWithNullId(JsonNode response) {
+    assertEquals(MAPPER.getNodeFactory().textNode("2.0"), response.get("jsonrpc"));
+    assertEquals(MAPPER.getNodeFactory().numberNode(-32600),
+        response.get("error").get("code"));
+    assertEquals(MAPPER.getNodeFactory().textNode("Invalid Request"),
+        response.get("error").get("message"));
+    assertFalse(response.get("error").has("data"));
+    assertTrue(response.get("id").isNull());
+  }
+
   private MockHttpServletResponse doPost(String body) throws Exception {
-    MockHttpServletRequest req = new MockHttpServletRequest("POST", "/jsonrpc");
-    req.setContent(body.getBytes(StandardCharsets.UTF_8));
     MockHttpServletResponse resp = new MockHttpServletResponse();
-    servlet.callDoPost(req, resp);
+    doPost(body, resp);
     return resp;
+  }
+
+  private void doPost(String body, HttpServletResponse response) throws Exception {
+    MockHttpServletRequest request = new MockHttpServletRequest("POST", "/jsonrpc");
+    request.setContent(body.getBytes(StandardCharsets.UTF_8));
+    servlet.callDoPost(request, response);
+  }
+
+  private void assertCleanupFailureDoesNotReplaceFatal(HttpServletResponse response)
+      throws Exception {
+    StackOverflowError fatal = new StackOverflowError("original-fatal-marker");
+    doThrow(fatal).when(mockRpcServer)
+        .handleRequest(any(InputStream.class), any(OutputStream.class));
+
+    StackOverflowError thrown = assertThrows(StackOverflowError.class,
+        () -> doPost("{\"method\":\"eth_blockNumber\",\"id\":1}", response));
+
+    assertSame(fatal, thrown);
+  }
+
+  private static class IOExceptionOnFlushResponse extends HttpServletResponseWrapper {
+
+    IOExceptionOnFlushResponse() {
+      super(new MockHttpServletResponse());
+    }
+
+    @Override
+    public void flushBuffer() throws IOException {
+      throw new IOException("cleanup-io-marker");
+    }
+  }
+
+  private static class ErrorOnFlushResponse extends HttpServletResponseWrapper {
+
+    ErrorOnFlushResponse() {
+      super(new MockHttpServletResponse());
+    }
+
+    @Override
+    public void flushBuffer() throws IOException {
+      throw new OutOfMemoryError("cleanup-error-marker");
+    }
   }
 
   private static class TestableServlet extends JsonRpcServlet {
