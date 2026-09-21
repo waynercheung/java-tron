@@ -15,6 +15,8 @@
 
 package org.tron.common.application;
 
+import static org.tron.core.exception.TronError.ErrCode.API_SERVER_INIT;
+
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.ProtoReflectionService;
@@ -26,6 +28,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.config.args.Args;
+import org.tron.core.exception.TronError;
 import org.tron.core.services.filter.LiteFnQueryGrpcInterceptor;
 import org.tron.core.services.ratelimiter.PrometheusInterceptor;
 import org.tron.core.services.ratelimiter.RateLimiterInterceptor;
@@ -92,8 +95,15 @@ public abstract class RpcService extends AbstractService {
   }
 
   protected NettyServerBuilder initServerBuilder() {
-    NettyServerBuilder serverBuilder = NettyServerBuilder.forPort(this.port);
     CommonParameter parameter = Args.getInstance();
+    int maxRstStream = parameter.getRpcMaxRstStream();
+    int secondsPerWindow = parameter.getRpcSecondsPerWindow();
+    // Validate before allocating the executor, including callers bypassing NodeConfig.
+    if (maxRstStream <= 0 || secondsPerWindow <= 0 || maxRstStream == Integer.MAX_VALUE) {
+      throw new TronError("Invalid gRPC RST_STREAM limit config: maxRstStream="
+          + maxRstStream + ", secondsPerWindow=" + secondsPerWindow, API_SERVER_INIT);
+    }
+    NettyServerBuilder serverBuilder = NettyServerBuilder.forPort(this.port);
     if (parameter.getRpcThreadNum() > 0) {
       this.executorService = ExecutorServiceManager.newFixedThreadPool(
           this.executorName, parameter.getRpcThreadNum());
@@ -107,10 +117,7 @@ public abstract class RpcService extends AbstractService {
         .maxConnectionAge(parameter.getMaxConnectionAgeInMillis(), TimeUnit.MILLISECONDS)
         .maxInboundMessageSize(parameter.getMaxMessageSize())
         .maxHeaderListSize(parameter.getMaxHeaderListSize());
-    if (parameter.getRpcMaxRstStream() > 0 && parameter.getRpcSecondsPerWindow() > 0) {
-      serverBuilder.maxRstFramesPerWindow(
-          parameter.getRpcMaxRstStream(), parameter.getRpcSecondsPerWindow());
-    }
+    serverBuilder.maxRstFramesPerWindow(maxRstStream, secondsPerWindow);
 
     if (parameter.isRpcReflectionServiceEnable()) {
       serverBuilder.addService(ProtoReflectionService.newInstance());

@@ -15,12 +15,18 @@
 
 package org.tron.common.application;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.tron.common.math.StrictMathWrapper.min;
+import static org.tron.core.exception.TronError.ErrCode.API_SERVER_INIT;
 
 import com.google.protobuf.Empty;
+import com.typesafe.config.ConfigFactory;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Server;
@@ -48,20 +54,25 @@ import java.util.concurrent.TimeUnit;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.config.args.Args;
+import org.tron.core.config.args.NodeConfig;
+import org.tron.core.exception.TronError;
 
 public class RpcServiceHttp2SecurityTest {
 
   private static final int HEADERS_FRAME_TYPE = 0x1;
   private static final int RST_STREAM_FRAME_TYPE = 0x3;
   private static final int SETTINGS_FRAME_TYPE = 0x4;
+  private static final int PING_FRAME_TYPE = 0x6;
   private static final int GO_AWAY_FRAME_TYPE = 0x7;
   private static final int SETTINGS_MAX_CONCURRENT_STREAMS = 0x3;
   private static final byte[] CLIENT_PREFACE =
       "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(StandardCharsets.US_ASCII);
   private static final byte[] EMPTY_SETTINGS_FRAME =
       new byte[]{0, 0, 0, 4, 0, 0, 0, 0, 0};
+  private static final byte[] PING_PAYLOAD = new byte[]{1, 2, 3, 4, 5, 6, 7, 8};
   private static final String SERVICE_NAME = "test.HoldService";
   private static final String METHOD_NAME = "Hold";
   private static final String METHOD_PATH = "/" + SERVICE_NAME + "/" + METHOD_NAME;
@@ -99,8 +110,8 @@ public class RpcServiceHttp2SecurityTest {
     parameter.setMaxConnectionAgeInMillis(Long.MAX_VALUE);
     parameter.setMaxMessageSize(4 * 1024 * 1024);
     parameter.setMaxHeaderListSize(8 * 1024);
-    parameter.setRpcMaxRstStream(0);
-    parameter.setRpcSecondsPerWindow(0);
+    parameter.setRpcMaxRstStream(NodeConfig.RpcConfig.DEFAULT_MAX_RST_STREAM);
+    parameter.setRpcSecondsPerWindow(NodeConfig.RpcConfig.DEFAULT_SECONDS_PER_WINDOW);
     parameter.setRpcReflectionServiceEnable(false);
   }
 
@@ -141,6 +152,153 @@ public class RpcServiceHttp2SecurityTest {
       server.shutdownNow();
       assertTrue(server.awaitTermination(5, TimeUnit.SECONDS));
     }
+  }
+
+  @Test
+  public void shouldEnforceDefaultRstLimit() throws Exception {
+    useRstConfig("");
+    assertRstLimitEnforced(NodeConfig.RpcConfig.DEFAULT_MAX_RST_STREAM);
+  }
+
+  @Test
+  public void shouldEnforceRstLimitForLegacyZeroConfig() throws Exception {
+    useRstConfig("node.rpc { maxRstStream = 0, secondsPerWindow = 0 }");
+    assertRstLimitEnforced(NodeConfig.RpcConfig.DEFAULT_MAX_RST_STREAM);
+  }
+
+  @Test
+  public void shouldEnforceExplicitRstLimit() throws Exception {
+    parameter.setRpcMaxRstStream(2);
+    parameter.setRpcSecondsPerWindow(30);
+    assertRstLimitEnforced(2);
+  }
+
+  @Test
+  public void shouldRejectInvalidRstLimitsBeforeAllocatingExecutor() throws Exception {
+    parameter.setRpcThreadNum(1);
+    int[][] cases = {
+        {0, 0}, {0, 5}, {1000, 0}, {-1, 5}, {1000, -1},
+        {Integer.MIN_VALUE, 5}, {1000, Integer.MIN_VALUE},
+        {Integer.MAX_VALUE, 5}
+    };
+    for (int[] values : cases) {
+      parameter.setRpcMaxRstStream(values[0]);
+      parameter.setRpcSecondsPerWindow(values[1]);
+      TestRpcService rpcService = new TestRpcService();
+      try {
+        TronError exception = assertThrows(TronError.class, rpcService::newServerBuilder);
+        assertEquals(API_SERVER_INIT, exception.getErrCode());
+        assertTrue(exception.getMessage().contains("maxRstStream=" + values[0]));
+        assertTrue(exception.getMessage().contains("secondsPerWindow=" + values[1]));
+        assertNull("Invalid configuration must not allocate an executor",
+            ReflectionTestUtils.getField(rpcService, "executorService"));
+      } finally {
+        rpcService.innerStop();
+      }
+    }
+  }
+
+  @Test
+  public void shouldAcceptLargestFiniteRstLimitAndWindow() {
+    parameter.setRpcMaxRstStream(Integer.MAX_VALUE - 1);
+    parameter.setRpcSecondsPerWindow(Integer.MAX_VALUE);
+    assertNotNull(new TestRpcService().newServerBuilder());
+  }
+
+  private void useRstConfig(String hocon) {
+    NodeConfig.RpcConfig rpc = NodeConfig.fromConfig(ConfigFactory.parseString(hocon)
+        .withFallback(ConfigFactory.defaultReference())).getRpc();
+    parameter.setRpcMaxRstStream(rpc.getMaxRstStream());
+    parameter.setRpcSecondsPerWindow(rpc.getSecondsPerWindow());
+  }
+
+  private void assertRstLimitEnforced(int limit) throws Exception {
+    // Prepare frames before connecting so encoding does not consume the counting window.
+    ByteArrayOutputStream burst = new ByteArrayOutputStream();
+    burst.write(CLIENT_PREFACE);
+    burst.write(EMPTY_SETTINGS_FRAME);
+    for (int i = 0; i < limit; i++) {
+      int streamId = 2 * i + 1;
+      burst.write(newHeadersFrame(streamId));
+      burst.write(newRstStreamFrame(streamId));
+    }
+    burst.write(newPingFrame());
+    int excessStreamId = 2 * limit + 1;
+    burst.write(newHeadersFrame(excessStreamId));
+    burst.write(newRstStreamFrame(excessStreamId));
+    byte[] frames = burst.toByteArray();
+
+    parameter.setMaxConcurrentCallsPerConnection(100);
+    TestRpcService rpcService = new TestRpcService();
+    Server server = rpcService.newServerBuilder()
+        .addService(newHoldService())
+        .build()
+        .start();
+
+    try (Socket socket = new Socket("127.0.0.1", server.getPort())) {
+      socket.setSoTimeout(5_000);
+      OutputStream output = socket.getOutputStream();
+      // Send PING and the excess reset together to avoid a round-trip within the short window.
+      output.write(frames);
+      output.flush();
+
+      // Exactly the configured number of resets is allowed on the connection.
+      assertPingAcknowledged(socket.getInputStream());
+      assertRstFloodGoAway(socket.getInputStream());
+    } finally {
+      server.shutdownNow();
+      assertTrue(server.awaitTermination(5, TimeUnit.SECONDS));
+    }
+  }
+
+  private static byte[] newRstStreamFrame(int streamId) {
+    return ByteBuffer.allocate(13)
+        .put(new byte[]{0, 0, 4, RST_STREAM_FRAME_TYPE, 0})
+        .putInt(streamId)
+        .putInt((int) Http2Error.CANCEL.code())
+        .array();
+  }
+
+  private static byte[] newPingFrame() {
+    return ByteBuffer.allocate(17)
+        .put(new byte[]{0, 0, 8, PING_FRAME_TYPE, 0})
+        .putInt(0)
+        .put(PING_PAYLOAD)
+        .array();
+  }
+
+  private static void assertPingAcknowledged(InputStream input) throws IOException {
+    for (int i = 0; i < 512; i++) {
+      Http2Frame frame = readFrame(input);
+      if (frame.type == GO_AWAY_FRAME_TYPE) {
+        fail("Server closed the connection before the RST_STREAM limit was exceeded");
+      }
+      if (frame.type == PING_FRAME_TYPE && (frame.flags & 0x1) != 0) {
+        assertEquals(0, frame.streamId);
+        assertArrayEquals(PING_PAYLOAD, frame.payload);
+        return;
+      }
+    }
+    fail("No PING acknowledgement at the RST_STREAM limit");
+  }
+
+  private static void assertRstFloodGoAway(InputStream input) throws IOException {
+    for (int i = 0; i < 512; i++) {
+      Http2Frame frame;
+      try {
+        frame = readFrame(input);
+      } catch (EOFException e) {
+        break;
+      }
+      if (frame.type == GO_AWAY_FRAME_TYPE) {
+        assertEquals(0, frame.streamId);
+        assertTrue("Invalid GOAWAY payload", frame.payload.length >= 8);
+        long errorCode = ByteBuffer.wrap(frame.payload).getInt(4) & 0xffff_ffffL;
+        assertEquals(Http2Error.ENHANCE_YOUR_CALM.code(), errorCode);
+        return;
+      }
+    }
+    fail("No ENHANCE_YOUR_CALM GOAWAY after exceeding the RST_STREAM limit");
   }
 
   private static ServerServiceDefinition newHoldService() {
@@ -236,8 +394,9 @@ public class RpcServiceHttp2SecurityTest {
     int payloadLength =
         ((header[0] & 0xff) << 16) | ((header[1] & 0xff) << 8) | (header[2] & 0xff);
     int type = header[3] & 0xff;
+    int flags = header[4] & 0xff;
     int streamId = ByteBuffer.wrap(header, 5, 4).getInt() & 0x7fff_ffff;
-    return new Http2Frame(type, streamId, readFully(input, payloadLength));
+    return new Http2Frame(type, flags, streamId, readFully(input, payloadLength));
   }
 
   private static byte[] readFully(InputStream input, int length) throws IOException {
@@ -256,11 +415,13 @@ public class RpcServiceHttp2SecurityTest {
   private static final class Http2Frame {
 
     private final int type;
+    private final int flags;
     private final int streamId;
     private final byte[] payload;
 
-    private Http2Frame(int type, int streamId, byte[] payload) {
+    private Http2Frame(int type, int flags, int streamId, byte[] payload) {
       this.type = type;
+      this.flags = flags;
       this.streamId = streamId;
       this.payload = payload;
     }
