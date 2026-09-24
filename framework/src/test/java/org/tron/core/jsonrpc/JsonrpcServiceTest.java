@@ -52,6 +52,7 @@ import org.tron.core.services.NodeInfoService;
 import org.tron.core.services.interfaceJsonRpcOnPBFT.JsonRpcServiceOnPBFT;
 import org.tron.core.services.interfaceJsonRpcOnSolidity.JsonRpcServiceOnSolidity;
 import org.tron.core.services.jsonrpc.FullNodeJsonRpcHttpService;
+import org.tron.core.services.jsonrpc.TronJsonRpc;
 import org.tron.core.services.jsonrpc.TronJsonRpc.FilterRequest;
 import org.tron.core.services.jsonrpc.TronJsonRpc.LogFilterElement;
 import org.tron.core.services.jsonrpc.TronJsonRpcImpl;
@@ -1556,6 +1557,57 @@ public class JsonrpcServiceTest extends BaseTest {
     JsonRpcInvalidParamsException e = Assert.assertThrows(JsonRpcInvalidParamsException.class,
         () -> tronJsonRpc.buildTransaction(args));
     Assert.assertEquals("invalid abi", e.getMessage());
+  }
+
+  private static BuildArguments createSmartContractArgs(String abi, boolean visible) {
+    BuildArguments args = new BuildArguments();
+    args.setFrom("0xabd4b9367799eaa3197fecb144eb71de1e049abc");
+    args.setData("608060405234801561001057600080fd5b50");
+    args.setGas("0x3b9aca00");
+    args.setAbi(abi);
+    args.setVisible(visible);
+    return args;
+  }
+
+  private static JSONObject abiOf(TronJsonRpc.TransactionJson transactionJson) {
+    JSONArray contracts = transactionJson.getTransaction().getJSONObject("raw_data")
+        .getJSONArray("contract");
+    Assert.assertEquals(1, contracts.size());
+    return contracts.getJSONObject(0).getJSONObject("parameter").getJSONObject("value")
+        .getJSONObject("new_contract").getJSONObject("abi");
+  }
+
+  @Test
+  public void testBuildCreateSmartContractAbiNumericAliasMatchesFieldName() throws Exception {
+    // ABI.Entry: name = 3, inputs = 4; ABI.Entry.Param: name = 2, type = 3
+    String named = "[{\"name\":\"f\",\"inputs\":[{\"name\":\"a\",\"type\":\"uint256\"}],"
+        + "\"type\":\"function\"}]";
+    String alias = "[{\"3\":\"f\",\"4\":[{\"2\":\"a\",\"3\":\"uint256\"}],"
+        + "\"type\":\"function\"}]";
+
+    JSONObject fromNamed = abiOf(tronJsonRpc.buildTransaction(
+        createSmartContractArgs(named, false)));
+    JSONObject fromAlias = abiOf(tronJsonRpc.buildTransaction(
+        createSmartContractArgs(alias, false)));
+
+    Assert.assertEquals(fromNamed.toJSONString(), fromAlias.toJSONString());
+    JSONObject entry = fromAlias.getJSONArray("entrys").getJSONObject(0);
+    Assert.assertEquals("f", entry.getString("name"));
+    Assert.assertEquals("uint256",
+        entry.getJSONArray("inputs").getJSONObject(0).getString("type"));
+  }
+
+  @Test
+  public void testBuildCreateSmartContractAbiRejectsStringForNumericMessageField() {
+    // ABI.Entry.inputs = 4 is a repeated message field; a string value is not a JSON object,
+    // whichever address format the request uses.
+    String abi = "[{\"name\":\"f\",\"4\":\"1201611a0775696e74323536\"}]";
+    for (boolean visible : new boolean[] {false, true}) {
+      JsonRpcInvalidParamsException e = Assert.assertThrows(
+          JsonRpcInvalidParamsException.class,
+          () -> tronJsonRpc.buildTransaction(createSmartContractArgs(abi, visible)));
+      Assert.assertEquals("invalid abi", e.getMessage());
+    }
   }
 
   @Test
