@@ -301,4 +301,83 @@ public class UtilTest extends BaseTest {
     Assert.assertTrue(jsonObject.getJSONObject("result").getString("message")
         .contains("too many signatures"));
   }
+
+  private static String permissionUpdateContract(String value) {
+    return "{\"parameter\":{\"value\":" + value
+        + ",\"type_url\":\"type.googleapis.com/protocol.AccountPermissionUpdateContract\"},"
+        + "\"type\":\"AccountPermissionUpdateContract\"}";
+  }
+
+  private static String transactionWithContracts(String... contracts) {
+    return "{\"raw_data\":{\"contract\":[" + String.join(",", contracts)
+        + "],\"timestamp\":1}}";
+  }
+
+  @Test
+  public void testPackTransactionNumericFieldAliasMatchesFieldName() {
+    String permission = "{\"threshold\":1,\"keys\":[{\"address\":\"" + OWNER_ADDRESS
+        + "\",\"weight\":1}]}";
+    Transaction named = Util.packTransaction(transactionWithContracts(permissionUpdateContract(
+        "{\"owner_address\":\"" + OWNER_ADDRESS + "\",\"owner\":" + permission + "}")), false);
+    Transaction alias = Util.packTransaction(transactionWithContracts(permissionUpdateContract(
+        "{\"1\":\"" + OWNER_ADDRESS + "\",\"2\":" + permission + "}")), false);
+
+    Assert.assertEquals(1, named.getRawData().getContractCount());
+    Assert.assertEquals(1, alias.getRawData().getContractCount());
+    Assert.assertEquals(named.getRawData().getContract(0).getParameter(),
+        alias.getRawData().getContract(0).getParameter());
+  }
+
+  @Test
+  public void testPackTransactionNumericFieldAliasRejectsStringForMessageField() {
+    Transaction transaction = Util.packTransaction(
+        transactionWithContracts(permissionUpdateContract("{\"2\":\"3a003a00\"}")), false);
+
+    // The contract fails to parse and is dropped, exactly like any other malformed value.
+    Assert.assertNotNull(transaction);
+    Assert.assertEquals(0, transaction.getRawData().getContractCount());
+  }
+
+  @Test
+  public void testPackTransactionReturnsNullWhenTheEnvelopeFailsToParse() {
+    // Util.packTransaction merges twice: once per contract, and once for the whole transaction.
+    // A failure in the second merge has always returned null, whichever spelling causes it.
+    String valid = permissionUpdateContract("{\"owner_address\":\"" + OWNER_ADDRESS
+        + "\",\"owner\":{\"threshold\":1}}");
+    String envelope = "{\"raw_data\":{\"contract\":[" + valid + "],\"timestamp\":1}";
+
+    Transaction control = Util.packTransaction(envelope + "}", false);
+    Assert.assertNotNull(control);
+    Assert.assertEquals(1, control.getRawData().getContractCount());
+
+    // Transaction.ret = 5 is a repeated message field: the object form parses, ...
+    Transaction withRet = Util.packTransaction(envelope + ",\"5\":[{}]}", false);
+    Assert.assertNotNull(withRet);
+    Assert.assertEquals(1, withRet.getRetCount());
+
+    // ... the string form does not, and the whole merge fails.
+    Assert.assertNull(Util.packTransaction(envelope + ",\"5\":\"0a00\"}", false));
+    // Same outcome for the field name, which is how this path already behaved.
+    Assert.assertNull(Util.packTransaction(envelope + ",\"ret\":\"0a00\"}", false));
+  }
+
+  @Test
+  public void testPackTransactionDropsOnlyTheContractThatFailsToParse() {
+    String valid = permissionUpdateContract("{\"owner_address\":\"" + OWNER_ADDRESS
+        + "\",\"owner\":{\"threshold\":1}}");
+    String invalid = permissionUpdateContract("{\"2\":\"3a003a00\"}");
+
+    Transaction transaction = Util.packTransaction(
+        transactionWithContracts(invalid, valid), false);
+
+    Assert.assertNotNull(transaction);
+    Assert.assertEquals(1, transaction.getRawData().getContractCount());
+    Assert.assertEquals(Protocol.Transaction.Contract.ContractType.AccountPermissionUpdateContract,
+        transaction.getRawData().getContract(0).getType());
+
+    // Both contracts share a type, so compare the payload to prove the valid one survived.
+    Transaction onlyValid = Util.packTransaction(transactionWithContracts(valid), false);
+    Assert.assertEquals(onlyValid.getRawData().getContract(0).getParameter(),
+        transaction.getRawData().getContract(0).getParameter());
+  }
 }

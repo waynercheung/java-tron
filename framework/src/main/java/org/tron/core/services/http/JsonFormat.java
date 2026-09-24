@@ -37,7 +37,6 @@ import com.google.protobuf.Descriptors.EnumDescriptor;
 import com.google.protobuf.Descriptors.EnumValueDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.ExtensionRegistry;
-import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import com.google.protobuf.UnknownFieldSet;
 import java.io.IOException;
@@ -567,7 +566,6 @@ public class JsonFormat {
     FieldDescriptor field;
     Descriptor type = builder.getDescriptorForType();
     final ExtensionRegistry.ExtensionInfo extension;
-    boolean unknown = false;
 
     String name = tokenizer.consumeIdentifier();
     field = type.findFieldByName(name);
@@ -591,11 +589,10 @@ public class JsonFormat {
       field = null;
     }
 
-    // Last try to lookup by field-index if 'name' is numeric,
-    // which indicates a possible unknown field
+    // Last try to look the field up by number if 'name' is a single digit. The alias
+    // resolves to the same descriptor as the field name and is parsed the same way.
     if (field == null && DIGITS.matcher(name).matches()) {
       field = type.findFieldByNumber(Integer.parseInt(name));
-      unknown = true;
     }
 
     // Finally, look for extensions
@@ -627,11 +624,11 @@ public class JsonFormat {
 
       if (array) {
         while (!tokenizer.tryConsume("]")) {
-          handleValue(tokenizer, extensionRegistry, builder, field, extension, unknown, selfType);
+          handleValue(tokenizer, extensionRegistry, builder, field, extension, selfType);
           tokenizer.tryConsume(",");
         }
       } else {
-        handleValue(tokenizer, extensionRegistry, builder, field, extension, unknown, selfType);
+        handleValue(tokenizer, extensionRegistry, builder, field, extension, selfType);
       }
     }
   }
@@ -684,12 +681,11 @@ public class JsonFormat {
       Message.Builder builder,
       FieldDescriptor field,
       ExtensionRegistry.ExtensionInfo extension,
-      boolean unknown, boolean selfType) throws ParseException {
+      boolean selfType) throws ParseException {
 
     Object value = null;
     if (field.getJavaType() == FieldDescriptor.JavaType.MESSAGE) {
-      value = handleObject(tokenizer, extensionRegistry, builder, field, extension, unknown,
-          selfType);
+      value = handleObject(tokenizer, extensionRegistry, builder, field, extension, selfType);
     } else {
       value = handlePrimitive(tokenizer, field, selfType);
     }
@@ -798,23 +794,13 @@ public class JsonFormat {
       Message.Builder builder,
       FieldDescriptor field,
       ExtensionRegistry.ExtensionInfo extension,
-      boolean unknown, boolean selfType) throws ParseException {
+      boolean selfType) throws ParseException {
 
     Message.Builder subBuilder;
     if (extension == null) {
       subBuilder = builder.newBuilderForField(field);
     } else {
       subBuilder = extension.defaultInstance.newBuilderForType();
-    }
-
-    if (unknown) {
-      ByteString data = tokenizer.consumeByteString("", selfType);
-      try {
-        subBuilder.mergeFrom(data);
-        return subBuilder.build();
-      } catch (InvalidProtocolBufferException e) {
-        throw tokenizer.parseException("Failed to build " + field.getFullName() + " from " + data);
-      }
     }
 
     tokenizer.consume("{");
