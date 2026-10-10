@@ -59,6 +59,7 @@ import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.Commons;
 import org.tron.common.utils.StringUtil;
 import org.tron.core.Constant;
+import org.tron.core.config.args.Args;
 import org.tron.protos.contract.BalanceContract;
 
 /**
@@ -592,9 +593,11 @@ public class JsonFormat {
       field = null;
     }
 
-    // Last try to lookup by field-index if 'name' is numeric,
-    // which indicates a possible unknown field
-    if (field == null && DIGITS.matcher(name).matches()) {
+    // Last try to lookup by field-index if 'name' is numeric, which indicates a possible
+    // unknown field. Skipped when numeric field aliases are disabled, so the digit key is
+    // then treated as an unknown field.
+    if (field == null && DIGITS.matcher(name).matches()
+        && Args.getInstance().isNodeAllowNumericFieldAlias()) {
       field = type.findFieldByNumber(Integer.parseInt(name));
       unknown = true;
     }
