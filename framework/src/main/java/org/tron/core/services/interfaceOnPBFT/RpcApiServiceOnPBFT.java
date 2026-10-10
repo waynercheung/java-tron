@@ -71,8 +71,8 @@ public class RpcApiServiceOnPBFT extends RpcService {
 
   @Override
   protected void addService(NettyServerBuilder serverBuilder) {
-    serverBuilder.addService(new DatabaseApi());
-    serverBuilder.addService(new WalletPBFTApi());
+    serverBuilder.addService(guardTransactionMethods(new DatabaseApi().bindService()));
+    serverBuilder.addService(guardTransactionMethods(new WalletPBFTApi().bindService()));
   }
 
   /**

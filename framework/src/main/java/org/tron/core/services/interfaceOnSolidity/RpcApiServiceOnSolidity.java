@@ -74,8 +74,8 @@ public class RpcApiServiceOnSolidity extends RpcService {
 
   @Override
   protected void addService(NettyServerBuilder serverBuilder) {
-    serverBuilder.addService(new DatabaseApi());
-    serverBuilder.addService(new WalletSolidityApi());
+    serverBuilder.addService(guardTransactionMethods(new DatabaseApi().bindService()));
+    serverBuilder.addService(guardTransactionMethods(new WalletSolidityApi().bindService()));
   }
 
   private TransactionExtention transaction2Extention(Transaction transaction) {

@@ -195,19 +195,19 @@ public class RpcApiService extends RpcService {
 
   @Override
   protected void addService(NettyServerBuilder serverBuilder) {
-    serverBuilder.addService(databaseApi);
+    serverBuilder.addService(guardTransactionMethods(databaseApi.bindService()));
     CommonParameter parameter = Args.getInstance();
     if (parameter.isSolidityNode()) {
-      serverBuilder.addService(walletSolidityApi);
+      serverBuilder.addService(guardTransactionMethods(walletSolidityApi.bindService()));
       if (parameter.isWalletExtensionApi()) {
-        serverBuilder.addService(new WalletExtensionApi());
+        serverBuilder.addService(guardTransactionMethods(new WalletExtensionApi().bindService()));
       }
     } else {
-      serverBuilder.addService(walletApi);
+      serverBuilder.addService(guardTransactionMethods(walletApi.bindService()));
     }
 
     if (parameter.isNodeMetricsEnable()) {
-      serverBuilder.addService(monitorApi);
+      serverBuilder.addService(guardTransactionMethods(monitorApi.bindService()));
     }
   }
 
