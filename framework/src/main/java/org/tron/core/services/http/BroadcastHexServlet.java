@@ -9,6 +9,9 @@ import org.springframework.stereotype.Component;
 import org.tron.api.GrpcAPI;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.Wallet;
+import org.tron.core.admission.AdmissionRejectLog;
+import org.tron.core.admission.TransactionAdmissionException;
+import org.tron.core.admission.TransactionAdmissionGuard;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.json.JSONObject;
 import org.tron.protos.Protocol.Transaction;
@@ -16,6 +19,11 @@ import org.tron.protos.Protocol.Transaction;
 @Component
 @Slf4j(topic = "API")
 public class BroadcastHexServlet extends RateLimiterServlet {
+
+  private static final AdmissionRejectLog REJECT_LOG =
+      new AdmissionRejectLog(AdmissionRejectLog.DEFAULT_INTERVAL_MS);
+
+  private AdmissionRejectLog rejectLog = REJECT_LOG;
 
   @Autowired
   private Wallet wallet;
@@ -25,7 +33,18 @@ public class BroadcastHexServlet extends RateLimiterServlet {
       String input = request.getReader().lines()
           .collect(Collectors.joining(System.lineSeparator()));
       String trx = JSONObject.parseObject(input).getString("transaction");
-      Transaction transaction = Transaction.parseFrom(ByteArray.fromHexString(trx));
+      byte[] raw = ByteArray.fromHexString(trx);
+      try {
+        TransactionAdmissionGuard.checkTransaction(raw,
+            TransactionAdmissionGuard.MAX_TX_OCCURRENCES);
+      } catch (TransactionAdmissionException e) {
+        rejectLog.debug(logger, "broadcasthex rejected by admission check: {}, {} since last log",
+            e.getReason());
+        // processError would render this client error as "internal server error".
+        Util.writeAuditedError(TransactionAdmissionException.REJECTION_MESSAGE, response);
+        return;
+      }
+      Transaction transaction = Transaction.parseFrom(raw);
       TransactionCapsule transactionCapsule = new TransactionCapsule(transaction);
       String transactionID = ByteArray
           .toHexString(transactionCapsule.getTransactionId().getBytes());
