@@ -146,6 +146,26 @@ public class JsonFormat {
   }
 
   /**
+   * Thread-local flag set when the request body was converted from
+   * application/x-www-form-urlencoded, whose values all become JSON strings. While set, quoted
+   * numeric and boolean scalars are unquoted before their regular strict parser runs. Managed by
+   * {@code PostParams} and cleared in {@code RateLimiterServlet.service}.
+   */
+  private static final ThreadLocal<Boolean> FORM_INPUT = ThreadLocal.withInitial(() -> false);
+
+  public static void setFormInput(boolean enabled) {
+    FORM_INPUT.set(enabled);
+  }
+
+  public static void clearFormInput() {
+    FORM_INPUT.remove();
+  }
+
+  public static boolean isFormInput() {
+    return FORM_INPUT.get();
+  }
+
+  /**
    * Outputs a textual representation of the Protocol Message supplied into the parameter output.
    * (This representation is the new version of the classic "ProtocolPrinter" output from the
    * original Protocol Buffer system)
@@ -732,6 +752,9 @@ public class JsonFormat {
     if ("null".equals(tokenizer.currentToken())) {
       tokenizer.consume("null");
       return value;
+    }
+    if (FORM_INPUT.get()) {
+      tokenizer.unquoteFormScalar(field.getType());
     }
     switch (field.getType()) {
       case INT32:
@@ -1578,6 +1601,36 @@ public class JsonFormat {
      */
     public String currentToken() {
       return currentToken;
+    }
+
+    void unquoteFormScalar(FieldDescriptor.Type type) throws ParseException {
+      switch (type) {
+        case INT32:
+        case SINT32:
+        case SFIXED32:
+        case INT64:
+        case SINT64:
+        case SFIXED64:
+        case UINT32:
+        case FIXED32:
+        case UINT64:
+        case FIXED64:
+          if (currentToken.length() > MAX_INTEGER_TOKEN_LENGTH + 2) {
+            throw parseException("Integer token is too long: length " + currentToken.length()
+                + ", max " + (MAX_INTEGER_TOKEN_LENGTH + 2));
+          }
+          break;
+        case FLOAT:
+        case DOUBLE:
+        case BOOL:
+          break;
+        default:
+          return;
+      }
+      int len = currentToken.length();
+      if (len >= 2 && currentToken.charAt(0) == '"' && currentToken.charAt(len - 1) == '"') {
+        currentToken = currentToken.substring(1, len - 1);
+      }
     }
 
     /**

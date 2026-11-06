@@ -1,11 +1,11 @@
 package org.tron.core.services.http.servlets;
 
-import static org.apache.http.entity.ContentType.APPLICATION_FORM_URLENCODED;
 import static org.tron.core.services.http.servlets.Util.getJsonString;
 
 import java.util.stream.Collectors;
 import javax.servlet.http.HttpServletRequest;
 import lombok.Getter;
+import org.apache.commons.lang3.StringUtils;
 
 public class PostParams {
 
@@ -24,8 +24,12 @@ public class PostParams {
   public static PostParams getPostParams(HttpServletRequest request) throws Exception {
     String input = request.getReader().lines().collect(Collectors.joining(System.lineSeparator()));
     Util.checkBodySize(input);
-    if (APPLICATION_FORM_URLENCODED.getMimeType().equals(request.getContentType())) {
+    boolean formInput = Util.isFormUrlEncoded(request.getContentType())
+        && StringUtils.isNotEmpty(input) && !Util.isValidJson(input);
+    JsonFormat.setFormInput(false);
+    if (formInput) {
       input = getJsonString(input);
+      JsonFormat.setFormInput(true);
     }
     boolean visible = Util.getVisiblePost(input);
     return new PostParams(input, visible);

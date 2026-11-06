@@ -186,6 +186,7 @@ public abstract class RateLimiterServlet extends HttpServlet {
     // deliberately has no catch, so that setup keeps propagating its exceptions as before.
     // Everything the inner try holds keeps the catch clauses it already had.
     try {
+      JsonFormat.clearFormInput();
       // int64_as_string is honored only on GET requests (URL query). POST is intentionally
       // unsupported because reading the body here would consume request.getReader() and
       // break downstream servlets that read it themselves.
@@ -214,6 +215,7 @@ public abstract class RateLimiterServlet extends HttpServlet {
       // will leak int64_as_string state across requests on reused Tomcat threads,
       // producing intermittent quoted/unquoted output that is very hard to debug.
       JsonFormat.clearInt64AsString();
+      JsonFormat.clearFormInput();
       // Release whenever the per-endpoint permit was acquired (covers both the normal
       // completion path and the case where GlobalRateLimiter rejected the request).
       if (rateLimiter instanceof IPreemptibleRateLimiter && perEndpointAcquired) {

@@ -702,7 +702,7 @@ public class Util {
       if (StringUtils.isBlank(contentType)) {
         return null;
       }
-      if (contentType.contains(MimeTypes.Type.FORM_ENCODED.asString())) {
+      if (isFormUrlEncoded(contentType)) {
         return request.getParameter(key);
       } else {
         String value = getRequestValue(request);
@@ -812,6 +812,15 @@ public class Util {
         throw new ParseException("form has too many parameters, the limit is " + max);
       }
     }
+  }
+
+  public static boolean isFormUrlEncoded(String contentType) {
+    if (contentType == null) {
+      return false;
+    }
+    int semicolon = contentType.indexOf(';');
+    String mimeType = semicolon < 0 ? contentType : contentType.substring(0, semicolon);
+    return MimeTypes.Type.FORM_ENCODED.asString().equalsIgnoreCase(mimeType.trim());
   }
 
   public static boolean isValidJson(String json) {

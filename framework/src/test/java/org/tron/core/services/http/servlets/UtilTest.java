@@ -584,4 +584,18 @@ public class UtilTest extends BaseTest {
     Assert.assertEquals(1, reply.size());
     Assert.assertEquals(message, reply.getString("Error"));
   }
+
+  @Test
+  public void isFormUrlEncodedMatchesMimeTypeOnly() {
+    Assert.assertTrue(Util.isFormUrlEncoded("application/x-www-form-urlencoded"));
+    Assert.assertTrue(Util.isFormUrlEncoded("application/x-www-form-urlencoded; charset=UTF-8"));
+    Assert.assertTrue(Util.isFormUrlEncoded(" APPLICATION/X-WWW-FORM-URLENCODED ;charset=utf-8"));
+    Assert.assertFalse(Util.isFormUrlEncoded(null));
+    Assert.assertFalse(Util.isFormUrlEncoded(""));
+    Assert.assertFalse(Util.isFormUrlEncoded("application/json"));
+    Assert.assertFalse(
+        Util.isFormUrlEncoded("application/json; x=application/x-www-form-urlencoded"));
+    Assert.assertFalse(Util.isFormUrlEncoded("application/x-www-form-urlencoded-extra"));
+    Assert.assertFalse(Util.isFormUrlEncoded("text/application/x-www-form-urlencoded"));
+  }
 }
