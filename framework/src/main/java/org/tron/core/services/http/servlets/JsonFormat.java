@@ -29,6 +29,7 @@ package org.tron.core.services.http.servlets;
   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Utf8;
 import com.google.common.collect.ImmutableSet;
 import com.google.protobuf.ByteString;
@@ -142,6 +143,37 @@ public class JsonFormat {
    */
   public static boolean isInt64AsString() {
     return INT64_AS_STRING.get();
+  }
+
+  /**
+   * The JSON string produced from an application/x-www-form-urlencoded body, whose values all
+   * become JSON strings. Only a merge whose input is this exact object (reference equality)
+   * unquotes numeric and boolean scalars before their regular strict parser runs; any other
+   * input, including one with equal content, is parsed strictly. Managed by {@code PostParams}
+   * and cleared in {@code RateLimiterServlet.service}.
+   */
+  private static final ThreadLocal<String> FORM_BODY = new ThreadLocal<>();
+
+  public static void setFormBody(String body) {
+    if (body == null) {
+      FORM_BODY.remove();
+    } else {
+      FORM_BODY.set(body);
+    }
+  }
+
+  public static void clearFormBody() {
+    FORM_BODY.remove();
+  }
+
+  @VisibleForTesting
+  public static boolean hasFormBody() {
+    return FORM_BODY.get() != null;
+  }
+
+  private static boolean isFormBody(CharSequence input) {
+    String body = FORM_BODY.get();
+    return body != null && body == input;
   }
 
   /**
@@ -303,7 +335,7 @@ public class JsonFormat {
   public static void merge(CharSequence input,
       ExtensionRegistry extensionRegistry,
       Message.Builder builder, boolean selfType) throws ParseException {
-    Tokenizer tokenizer = new Tokenizer(input);
+    Tokenizer tokenizer = new Tokenizer(input, isFormBody(input));
 
     // Based on the state machine @ http://json.org/
 
@@ -732,6 +764,7 @@ public class JsonFormat {
       tokenizer.consume("null");
       return value;
     }
+    tokenizer.unquoteFormScalar(field.getType());
     switch (field.getType()) {
       case INT32:
       case SINT32:
@@ -1384,6 +1417,8 @@ public class JsonFormat {
             "\"([^\"\n\\\\]|\\\\.)*+(\"|\\\\?$)|" +       // a double-quoted string
             "\'([^\'\n\\\\]|\\\\.)*+(\'|\\\\?$)",         // a single-quoted string
         Pattern.MULTILINE);
+    private static final Pattern FORM_DECIMAL = Pattern.compile("-?[0-9]+");
+    private static final Pattern FORM_FLOAT = Pattern.compile("[0-9A-Za-z_.+-]+");
     private static final Pattern DOUBLE_INFINITY = Pattern.compile(
         "-?inf(inity)?",
         Pattern.CASE_INSENSITIVE);
@@ -1407,6 +1442,7 @@ public class JsonFormat {
     private int previousColumn = 0;
     private int currentDepth = 0;
     private int tokenCount = 0;
+    private final boolean formInput;
 
     public void enterRecursion() throws ParseException {
       if (currentDepth >= Constant.MAX_NESTING_DEPTH) {
@@ -1423,7 +1459,12 @@ public class JsonFormat {
      * Construct a tokenizer that parses tokens from the given text.
      */
     public Tokenizer(CharSequence text) throws ParseException {
+      this(text, false);
+    }
+
+    Tokenizer(CharSequence text, boolean formInput) throws ParseException {
       this.text = text;
+      this.formInput = formInput;
       matcher = WHITESPACE.matcher(text);
       skipWhitespace();
       nextToken();
@@ -1576,6 +1617,64 @@ public class JsonFormat {
      */
     public String currentToken() {
       return currentToken;
+    }
+
+    /**
+     * Unquotes a form value for a numeric or boolean field. Integers must be ASCII decimal and
+     * are read in base 10, so leading zeros never select octal; floating-point values must
+     * consist of ASCII number characters without whitespace. A value that does not qualify stays
+     * quoted and is rejected by the regular parser.
+     */
+    void unquoteFormScalar(FieldDescriptor.Type type) throws ParseException {
+      if (!formInput) {
+        return;
+      }
+      int len = currentToken.length();
+      if (len < 2 || currentToken.charAt(0) != '"' || currentToken.charAt(len - 1) != '"') {
+        return;
+      }
+      switch (type) {
+        case INT32:
+        case SINT32:
+        case SFIXED32:
+        case INT64:
+        case SINT64:
+        case SFIXED64:
+        case UINT32:
+        case FIXED32:
+        case UINT64:
+        case FIXED64:
+          if (len - 2 > MAX_INTEGER_TOKEN_LENGTH) {
+            throw parseException("Couldn't parse integer: Integer token is too long: length "
+                + (len - 2) + ", max " + MAX_INTEGER_TOKEN_LENGTH);
+          }
+          String digits = currentToken.substring(1, len - 1);
+          if (FORM_DECIMAL.matcher(digits).matches()) {
+            currentToken = stripLeadingZeros(digits);
+          }
+          return;
+        case FLOAT:
+        case DOUBLE:
+          String number = currentToken.substring(1, len - 1);
+          if (FORM_FLOAT.matcher(number).matches()) {
+            currentToken = number;
+          }
+          return;
+        case BOOL:
+          currentToken = currentToken.substring(1, len - 1);
+          return;
+        default:
+          return;
+      }
+    }
+
+    private static String stripLeadingZeros(String digits) {
+      int start = digits.charAt(0) == '-' ? 1 : 0;
+      int i = start;
+      while (i < digits.length() - 1 && digits.charAt(i) == '0') {
+        i++;
+      }
+      return i == start ? digits : digits.substring(0, start) + digits.substring(i);
     }
 
     /**
