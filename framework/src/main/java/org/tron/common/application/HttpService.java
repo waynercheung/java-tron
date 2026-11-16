@@ -25,6 +25,7 @@ import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.eclipse.jetty.http.BadMessageException;
 import org.eclipse.jetty.http.HttpHeader;
 import org.eclipse.jetty.http.HttpMethod;
 import org.eclipse.jetty.http.HttpStatus;
@@ -48,6 +49,10 @@ public abstract class HttpService extends AbstractService {
   protected String contextPath;
 
   protected long maxRequestSize = 4 * 1024 * 1024; // 4MB
+
+  // When true, a request rejected as malformed (a BadMessageException other than 413) also gets
+  // the short bad-message page; oversized requests always get it.
+  protected boolean shortBadRequestPage = false;
 
   // Once maxHttpConnectNumber is reached, Jetty applies this idle timeout to every open
   // connection, so connections that send nothing cannot hold every slot. While the limit is
@@ -107,7 +112,7 @@ public abstract class HttpService extends AbstractService {
       connectionLimit.setIdleTimeout(connectionLimitIdleTimeoutMs);
       this.apiServer.addBean(connectionLimit);
     }
-    this.apiServer.setErrorHandler(new OversizedRequestErrorHandler());
+    this.apiServer.setErrorHandler(new BadMessageErrorHandler(shortBadRequestPage));
   }
 
   protected ServletContextHandler initContextHandler() {
@@ -167,23 +172,37 @@ public abstract class HttpService extends AbstractService {
   }
 
   /**
-   * For oversized requests (the 413 thrown by RequestSizeLimitHandler during dispatch) logs the
-   * detail server-side and returns the short, uniform bad-message page, instead of the
-   * default error page that leaks the exception stack and internal request sizes. All
-   * other errors keep Jetty's default handling.
+   * For a request rejected during dispatch as oversized (the 413 thrown by
+   * RequestSizeLimitHandler) or, when enabled, malformed (any other BadMessageException, such as
+   * an unparsable query string), logs the detail server-side and returns the short, uniform
+   * bad-message page, instead of the default error page that leaks the exception stack,
+   * servlet name and internal request sizes. All other errors keep Jetty's default handling.
    */
-  private static final class OversizedRequestErrorHandler extends ErrorHandler {
+  private static final class BadMessageErrorHandler extends ErrorHandler {
+
+    private final boolean shortBadRequestPage;
+
+    BadMessageErrorHandler(boolean shortBadRequestPage) {
+      this.shortBadRequestPage = shortBadRequestPage;
+    }
 
     @Override
     public void handle(String target, Request baseRequest, HttpServletRequest request,
         HttpServletResponse response) throws IOException, ServletException {
-      if (response.getStatus() == HttpStatus.PAYLOAD_TOO_LARGE_413) {
-        Throwable cause = (Throwable) request.getAttribute(RequestDispatcher.ERROR_EXCEPTION);
-        logger.info("Reject oversized request, uri: {}, detail: {}",
-            request.getRequestURI(), cause == null ? "413" : cause.getMessage());
+      int status = response.getStatus();
+      Throwable cause = (Throwable) request.getAttribute(RequestDispatcher.ERROR_EXCEPTION);
+      if (status == HttpStatus.PAYLOAD_TOO_LARGE_413
+          || (shortBadRequestPage && cause instanceof BadMessageException)) {
+        String detail = cause == null ? String.valueOf(status) : cause.getMessage();
+        if (status == HttpStatus.PAYLOAD_TOO_LARGE_413) {
+          logger.info("Reject oversized request, uri: {}, detail: {}",
+              request.getRequestURI(), detail);
+        } else {
+          logger.debug("Reject bad request, uri: {}, detail: {}",
+              request.getRequestURI(), detail);
+        }
         baseRequest.setHandled(true);
-        ByteBuffer body = badMessageError(HttpStatus.PAYLOAD_TOO_LARGE_413,
-            HttpStatus.getMessage(HttpStatus.PAYLOAD_TOO_LARGE_413),
+        ByteBuffer body = badMessageError(status, HttpStatus.getMessage(status),
             baseRequest.getResponse().getHttpFields());
         response.getOutputStream().write(BufferUtil.toArray(body));
         return;

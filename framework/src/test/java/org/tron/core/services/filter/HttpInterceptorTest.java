@@ -56,7 +56,37 @@ public class HttpInterceptorTest {
   }
 
   @Test
-  public void testNonOversizedExceptionIsStillSwallowed() throws Exception {
+  public void testBadRequestBadMessagePropagatesWhenEnabled() {
+    initInterceptor(true, "", ENDPOINT, "/jsonrpc");
+    MockHttpServletRequest request = new MockHttpServletRequest("GET", ENDPOINT);
+    request.setServletPath(ENDPOINT);
+    MockHttpServletResponse response = new MockHttpServletResponse();
+    FilterChain chain = (req, resp) -> {
+      throw new BadMessageException("Unable to parse URI query");
+    };
+
+    BadMessageException e = assertThrows(BadMessageException.class,
+        () -> interceptor.doFilter(request, response, chain));
+
+    assertEquals(HttpStatus.BAD_REQUEST_400, e.getCode());
+  }
+
+  @Test
+  public void testBadRequestBadMessageIsSwallowedByDefault() throws Exception {
+    MockHttpServletRequest request = new MockHttpServletRequest("GET", "/jsonrpc");
+    request.setServletPath("/jsonrpc");
+    MockHttpServletResponse response = new MockHttpServletResponse();
+    FilterChain chain = (req, resp) -> {
+      throw new BadMessageException("Unable to parse URI query");
+    };
+
+    interceptor.doFilter(request, response, chain);
+
+    assertEquals("", response.getContentAsString());
+  }
+
+  @Test
+  public void testNonBadMessageExceptionIsStillSwallowed() throws Exception {
     MockHttpServletRequest request = new MockHttpServletRequest("POST", "/jsonrpc");
     request.setServletPath("/jsonrpc");
     MockHttpServletResponse response = new MockHttpServletResponse();
@@ -191,13 +221,22 @@ public class HttpInterceptorTest {
   }
 
   private void initInterceptor(String contextPath, String... mappings) {
+    initInterceptor(false, contextPath, mappings);
+  }
+
+  private void initInterceptor(boolean propagateBadRequest, String contextPath,
+      String... mappings) {
     ServletContext context = mock(ServletContext.class);
     ServletRegistration registration = mock(ServletRegistration.class);
     when(registration.getMappings()).thenReturn(Arrays.asList(mappings));
     doReturn(Collections.singletonMap("servlet", registration)).when(context)
         .getServletRegistrations();
     when(context.getContextPath()).thenReturn(contextPath);
-    interceptor.init(new MockFilterConfig(context));
+    MockFilterConfig config = new MockFilterConfig(context);
+    if (propagateBadRequest) {
+      config.addInitParameter(HttpInterceptor.PROPAGATE_BAD_REQUEST, "true");
+    }
+    interceptor.init(config);
   }
 
   private long meterCount(String key) {

@@ -38,6 +38,7 @@ public class FullNodeHttpApiService extends HttpService {
     enable = isFullNode() && Args.getInstance().isFullNodeHttpEnable();
     contextPath = "/";
     maxRequestSize = Args.getInstance().getHttpMaxMessageSize();
+    shortBadRequestPage = true;
   }
 
   @Override
@@ -89,6 +90,7 @@ public class FullNodeHttpApiService extends HttpService {
     FilterHolder fh = handler
         .addFilterWithMapping((Class<? extends Filter>) HttpInterceptor.class, "/*",
             EnumSet.of(DispatcherType.REQUEST));
+    fh.setInitParameter(HttpInterceptor.PROPAGATE_BAD_REQUEST, "true");
     context.addFilter(fh, "/*", EnumSet.of(DispatcherType.REQUEST));
   }
 }

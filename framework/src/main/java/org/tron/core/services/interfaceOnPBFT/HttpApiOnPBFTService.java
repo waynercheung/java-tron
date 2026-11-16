@@ -31,6 +31,7 @@ public class HttpApiOnPBFTService extends HttpService {
     enable = isFullNode() && Args.getInstance().isPBFTHttpEnable();
     contextPath = "/walletpbft";
     maxRequestSize = Args.getInstance().getHttpMaxMessageSize();
+    shortBadRequestPage = true;
   }
 
   @Override

@@ -25,11 +25,18 @@ import org.tron.core.metrics.MetricsUtil;
 @Slf4j(topic = "httpInterceptor")
 public class HttpInterceptor implements Filter {
 
+  /**
+   * Init parameter: when "true", every BadMessageException propagates to Jetty. Otherwise only
+   * the 413 for an oversized request does.
+   */
+  public static final String PROPAGATE_BAD_REQUEST = "propagateBadRequest";
+
   private final int HTTP_SUCCESS = 200;
   private final int HTTP_BAD_REQUEST = 400;
   private final int HTTP_NOT_ACCEPTABLE = 406;
 
   private Map<String, String> endpoints = Collections.emptyMap();
+  private boolean propagateBadRequest;
 
   @Override
   public void init(FilterConfig filterConfig) {
@@ -43,6 +50,8 @@ public class HttpInterceptor implements Filter {
       }
     }
     endpoints = Collections.unmodifiableMap(registered);
+    propagateBadRequest = Boolean.parseBoolean(
+        filterConfig.getInitParameter(PROPAGATE_BAD_REQUEST));
   }
 
   @Override
@@ -86,8 +95,8 @@ public class HttpInterceptor implements Filter {
       }
       MetricsUtil.meterMark(MetricsKey.NET_API_QPS, 1);
       MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS, 1);
-      if (e instanceof BadMessageException
-          && ((BadMessageException) e).getCode() == HttpStatus.PAYLOAD_TOO_LARGE_413) {
+      if (e instanceof BadMessageException && (propagateBadRequest
+          || ((BadMessageException) e).getCode() == HttpStatus.PAYLOAD_TOO_LARGE_413)) {
         throw (BadMessageException) e;
       }
     }

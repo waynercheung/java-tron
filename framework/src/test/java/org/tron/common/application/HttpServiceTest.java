@@ -109,6 +109,47 @@ public class HttpServiceTest {
     }
   }
 
+  @Test(timeout = 10_000)
+  public void testMalformedQueryReturnsShortBadRequestPageWhenEnabled() throws Exception {
+    TestHttpService service = new TestHttpService("127.0.0.1", 0);
+    service.shortBadRequestPage = true;
+    try {
+      service.start().get(10, TimeUnit.SECONDS);
+
+      String wire = getMalformedQuery(service.getConnector().getLocalPort());
+      Assert.assertTrue(wire, wire.startsWith("HTTP/1.1 400 "));
+      Assert.assertTrue(wire, wire.contains("Bad Message 400"));
+      Assert.assertFalse(wire, wire.contains("org.eclipse.jetty"));
+      Assert.assertFalse(wire, wire.contains("Unable to parse"));
+    } finally {
+      service.stop().get(10, TimeUnit.SECONDS);
+    }
+  }
+
+  @Test(timeout = 10_000)
+  public void testMalformedQueryKeepsDefaultErrorPageByDefault() throws Exception {
+    TestHttpService service = new TestHttpService("127.0.0.1", 0);
+    try {
+      service.start().get(10, TimeUnit.SECONDS);
+
+      String wire = getMalformedQuery(service.getConnector().getLocalPort());
+      Assert.assertTrue(wire, wire.startsWith("HTTP/1.1 400 "));
+      Assert.assertTrue(wire, wire.contains("Unable to parse URI query"));
+    } finally {
+      service.stop().get(10, TimeUnit.SECONDS);
+    }
+  }
+
+  private static String getMalformedQuery(int localPort) throws IOException {
+    try (Socket socket = new Socket("127.0.0.1", localPort)) {
+      socket.getOutputStream().write(("GET /query?x=%FF HTTP/1.1\r\n"
+          + "Host: 127.0.0.1\r\n"
+          + "Connection: close\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1));
+      return new String(ByteStreams.toByteArray(socket.getInputStream()),
+          StandardCharsets.ISO_8859_1);
+    }
+  }
+
   private static String read(InputStream in) throws IOException {
     if (in == null) {
       return "";
@@ -149,6 +190,13 @@ public class HttpServiceTest {
           resp.getWriter().print("ok");
         }
       }), "/echo");
+      context.addServlet(new ServletHolder(new HttpServlet() {
+        @Override
+        protected void doGet(HttpServletRequest req, HttpServletResponse resp)
+            throws IOException {
+          resp.getWriter().print(req.getParameter("x"));
+        }
+      }), "/query");
     }
   }
 }

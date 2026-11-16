@@ -11,6 +11,7 @@ import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.eclipse.jetty.http.BadMessageException;
 import org.springframework.stereotype.Component;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.json.JSONObject;
@@ -43,6 +44,8 @@ public class HttpApiAccessFilter implements Filter {
 
       chain.doFilter(request, response);
 
+    } catch (BadMessageException e) {
+      throw e;
     } catch (Exception e) {
       logger.error("http api access filter exception: {}", e.getMessage());
     }

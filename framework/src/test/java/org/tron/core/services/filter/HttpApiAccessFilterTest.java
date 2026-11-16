@@ -13,8 +13,11 @@ import org.apache.http.HttpStatus;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.eclipse.jetty.http.BadMessageException;
 import org.junit.Assert;
 import org.junit.Test;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.tron.common.BaseTest;
 import org.tron.common.TestConstants;
 import org.tron.common.parameter.CommonParameter;
@@ -122,6 +125,24 @@ public class HttpApiAccessFilterTest extends BaseTest {
     }
 
     return 0;
+  }
+
+  @Test
+  public void testBadMessagePropagatesAndOtherExceptionsAreSwallowed() throws Exception {
+    CommonParameter.getInstance().setDisabledApiList(Collections.emptyList());
+    MockHttpServletRequest request = new MockHttpServletRequest("GET", "/wallet/getnowblock");
+    request.setServletPath("/wallet/getnowblock");
+    MockHttpServletResponse response = new MockHttpServletResponse();
+
+    BadMessageException e = Assert.assertThrows(BadMessageException.class,
+        () -> httpApiAccessFilter.doFilter(request, response, (req, resp) -> {
+          throw new BadMessageException("Unable to parse URI query");
+        }));
+    Assert.assertEquals(400, e.getCode());
+
+    httpApiAccessFilter.doFilter(request, response, (req, resp) -> {
+      throw new IOException("expected");
+    });
   }
 
   @Test
