@@ -534,14 +534,16 @@ public class RateLimiterServletTest {
   }
 
   @Test
-  public void testGetReleasesPermitWhenParameterAccessThrows() throws Exception {
+  public void testGetMalformedQueryReturnsErrorAndReleasesPermit() throws Exception {
+    RecordingServlet recording = new RecordingServlet();
+    inject(recording, "container", container);
     IPreemptibleRateLimiter perEndpoint = Mockito.mock(IPreemptibleRateLimiter.class);
     when(perEndpoint.acquirePermit(any(RuntimeData.class))).thenReturn(true);
-    container.add(KEY_HTTP, "TestServlet", perEndpoint);
+    container.add(KEY_HTTP, "RecordingServlet", perEndpoint);
     MockHttpServletRequest getRequest = new MockHttpServletRequest("GET", "/test") {
       @Override
       public String getParameter(String name) {
-        throw new BadMessageException();
+        throw new BadMessageException("Unable to parse URI query");
       }
     };
     getRequest.setRemoteAddr("10.0.0.1");
@@ -549,9 +551,37 @@ public class RateLimiterServletTest {
     try (MockedStatic<GlobalRateLimiter> globalMock = mockStatic(GlobalRateLimiter.class)) {
       globalMock.when(() -> GlobalRateLimiter.acquirePermit(any())).thenReturn(true);
 
-      assertThrows(BadMessageException.class, () -> servlet.service(getRequest, response));
+      recording.service(getRequest, response);
 
       verify(perEndpoint, times(1)).release();
     }
+    assertEquals(HttpStatus.OK_200, response.getStatus());
+    assertTrue(response.getContentType().startsWith("application/json"));
+    assertEquals("{\"Error\":\"" + Util.INVALID_QUERY_STRING_MSG + "\"}",
+        response.getContentAsString().trim());
+    assertTrue(recording.events.isEmpty());
+  }
+
+  @Test
+  public void testGetSetupFailureOtherThanMalformedQueryPropagates() throws Exception {
+    IPreemptibleRateLimiter perEndpoint = Mockito.mock(IPreemptibleRateLimiter.class);
+    when(perEndpoint.acquirePermit(any(RuntimeData.class))).thenReturn(true);
+    container.add(KEY_HTTP, "TestServlet", perEndpoint);
+    MockHttpServletRequest getRequest = new MockHttpServletRequest("GET", "/test") {
+      @Override
+      public String getParameter(String name) {
+        throw new IllegalStateException("boom");
+      }
+    };
+    getRequest.setRemoteAddr("10.0.0.1");
+
+    try (MockedStatic<GlobalRateLimiter> globalMock = mockStatic(GlobalRateLimiter.class)) {
+      globalMock.when(() -> GlobalRateLimiter.acquirePermit(any())).thenReturn(true);
+
+      assertThrows(IllegalStateException.class, () -> servlet.service(getRequest, response));
+
+      verify(perEndpoint, times(1)).release();
+    }
+    assertEquals("", response.getContentAsString());
   }
 }

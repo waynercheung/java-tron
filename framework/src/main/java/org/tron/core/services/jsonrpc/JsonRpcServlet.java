@@ -111,6 +111,11 @@ public class JsonRpcServlet extends RateLimiterServlet {
   }
 
   @Override
+  protected boolean answersMalformedQuery() {
+    return false;
+  }
+
+  @Override
   protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
     try {
       doPostInternal(req, resp);

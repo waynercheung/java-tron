@@ -1,6 +1,7 @@
 package org.tron.core.services.http;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -13,6 +14,7 @@ import com.googlecode.jsonrpc4j.JsonRpcServer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collection;
+import org.eclipse.jetty.http.BadMessageException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -117,6 +119,27 @@ public class JsonRpcRateLimiterServletTest {
       global.verify(() -> GlobalRateLimiter.acquirePermit(any()));
       assertRateLimitResponse();
     }
+  }
+
+  @Test
+  public void testGetMalformedQueryStillPropagates() throws Exception {
+    when(perEndpoint.acquirePermit(any(RuntimeData.class))).thenReturn(true);
+    MockHttpServletRequest getRequest = new MockHttpServletRequest("GET", "/jsonrpc") {
+      @Override
+      public String getParameter(String name) {
+        throw new BadMessageException("Unable to parse URI query");
+      }
+    };
+    getRequest.setServletPath("/jsonrpc");
+    getRequest.setRemoteAddr("10.0.0.1");
+
+    try (MockedStatic<GlobalRateLimiter> global = mockStatic(GlobalRateLimiter.class)) {
+      global.when(() -> GlobalRateLimiter.acquirePermit(any())).thenReturn(true);
+
+      assertThrows(BadMessageException.class, () -> servlet.service(getRequest, response));
+    }
+    assertEquals("", response.getContentAsString());
+    verifyNoInteractions(dispatcher);
   }
 
   private void assertRateLimitResponse() throws Exception {

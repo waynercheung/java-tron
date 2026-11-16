@@ -183,14 +183,26 @@ public abstract class RateLimiterServlet extends HttpServlet {
     String url = Strings.isNullOrEmpty(req.getServletPath())
         ? MetricLabels.UNDEFINED : contextPath + req.getServletPath();
     // The outer try only pairs the GET setup below with the cleanup in the finally block; it
-    // deliberately has no catch, so that setup keeps propagating its exceptions as before.
-    // Everything the inner try holds keeps the catch clauses it already had.
+    // deliberately has no catch. A malformed query string is answered like other invalid
+    // parameters unless answersMalformedQuery() is false; anything else the setup throws keeps
+    // propagating as before. Everything the inner try holds keeps the catch clauses it already
+    // had.
     try {
       // int64_as_string is honored only on GET requests (URL query). POST is intentionally
       // unsupported because reading the body here would consume request.getReader() and
       // break downstream servlets that read it themselves.
       if ("GET".equalsIgnoreCase(req.getMethod())) {
-        JsonFormat.setInt64AsString(Util.getInt64AsString(req));
+        try {
+          JsonFormat.setInt64AsString(Util.getInt64AsString(req));
+        } catch (BadMessageException e) {
+          if (!answersMalformedQuery()) {
+            throw e;
+          }
+          logger.debug("Http Api {}, malformed query string: {}", url, e.getMessage());
+          resp.setContentType("application/json; charset=utf-8");
+          Util.writeAuditedError(Util.INVALID_QUERY_STRING_MSG, resp);
+          return;
+        }
       }
 
       try {
@@ -220,6 +232,14 @@ public abstract class RateLimiterServlet extends HttpServlet {
         ((IPreemptibleRateLimiter) rateLimiter).release();
       }
     }
+  }
+
+  /**
+   * Whether a GET whose query string cannot be parsed is answered here with an error body. When
+   * false, the exception propagates out of {@code service}.
+   */
+  protected boolean answersMalformedQuery() {
+    return true;
   }
 
   /**

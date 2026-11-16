@@ -76,6 +76,7 @@ public class Util {
   private static final String INTERNAL_SERVER_ERROR = "internal server error";
   public static final String RATE_LIMITER_ERROR_MSG = "lack of computing resources";
   static final String INVALID_ADDRESS_MSG = "INVALID address";
+  static final String INVALID_QUERY_STRING_MSG = "invalid query string";
 
   public static final String EVENTS_DEPRECATED_MSG =
       "'events' field is deprecated and no longer supported";
