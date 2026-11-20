@@ -82,6 +82,8 @@ import org.tron.core.exception.jsonrpc.JsonRpcInvalidRequestException;
 import org.tron.core.exception.jsonrpc.JsonRpcMethodNotFoundException;
 import org.tron.core.exception.jsonrpc.JsonRpcPrunedHistoryException;
 import org.tron.core.exception.jsonrpc.JsonRpcTooManyResultException;
+import org.tron.core.net.peer.PeerManager;
+import org.tron.core.net.peer.TronState;
 import org.tron.core.services.NodeInfoService;
 import org.tron.core.services.http.servlets.JsonFormat;
 import org.tron.core.services.http.servlets.Util;
@@ -1141,7 +1143,9 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
 
   @Override
   public Object getSyncingStatus() {
-    if (nodeInfoService.getNodeInfo().getPeerList().isEmpty()) {
+    boolean syncing = PeerManager.getPeers().stream()
+        .anyMatch(peer -> peer.getTronState() == TronState.SYNCING);
+    if (!syncing) {
       return false;
     }
 
