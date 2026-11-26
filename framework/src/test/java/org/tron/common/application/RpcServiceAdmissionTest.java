@@ -14,6 +14,7 @@ import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.GeneratedMessageV3;
 import com.google.protobuf.Internal;
 import com.google.protobuf.Message;
+import io.grpc.Attributes;
 import io.grpc.BindableService;
 import io.grpc.CallOptions;
 import io.grpc.ClientCall;
@@ -66,6 +67,8 @@ import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 import org.tron.api.DatabaseGrpc;
 import org.tron.api.GrpcAPI;
 import org.tron.api.MonitorGrpc;
@@ -389,30 +392,86 @@ public class RpcServiceAdmissionTest {
   }
 
   @Test
-  public void laterMessagesOnARejectedUnaryCallAreIgnored() throws Exception {
+  public void extraMessagesOnAUnaryCallAreRejectedBeforeTheGuard() throws Exception {
     Transaction flood = Transaction.parseFrom(retFlood(BUDGET + 1));
-    int before = HANDLER_CALLS.get();
-    // A unary call that carries a rejected message followed by a valid one.
-    assertEquals(Status.Code.INVALID_ARGUMENT,
-        rawUnaryCall(Arrays.asList(flood, legitimate())).getCode());
-    // A valid message followed by a rejected one.
-    assertEquals(Status.Code.INVALID_ARGUMENT,
-        rawUnaryCall(Arrays.asList(legitimate(), flood)).getCode());
-    // Two rejected messages: one rejection, counted once.
     CommonParameter parameter = CommonParameter.getInstance();
     boolean metrics = parameter.metricsPrometheusEnable;
     parameter.metricsPrometheusEnable = true;
     try {
       String name = WalletGrpc.getBroadcastTransactionMethod().getFullMethodName();
+      int before = HANDLER_CALLS.get();
       double rejected = rejections(name, Reason.OVER_BUDGET);
-      assertEquals(Status.Code.INVALID_ARGUMENT,
-          rawUnaryCall(Arrays.asList(flood, flood)).getCode());
-      assertEquals(rejected + 1, rejections(name, Reason.OVER_BUDGET), 0);
+      // grpc keeps the first message of a unary call unparsed and cancels the call when a
+      // second one arrives, so the marshaller never sees either of them.
+      for (String compression : Arrays.asList(null, "gzip")) {
+        for (List<Transaction> messages : Arrays.asList(Arrays.asList(flood, legitimate()),
+            Arrays.asList(legitimate(), flood), Arrays.asList(flood, flood),
+            Arrays.asList(legitimate(), legitimate()))) {
+          assertEquals(Status.Code.CANCELLED, rawUnaryCall(messages, compression).getCode());
+        }
+      }
+      assertEquals(rejected, rejections(name, Reason.OVER_BUDGET), 0);
+      assertEquals(before, HANDLER_CALLS.get());
     } finally {
       parameter.metricsPrometheusEnable = metrics;
     }
-    assertEquals(before, HANDLER_CALLS.get());
     awaitTrue(() -> STARTED.get() == FINISHED.get());
+    assertTrue(stub().broadcastTransaction(legitimate()).getResult());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void laterMessagesOnARejectedCallAreIgnored() throws Exception {
+    Transaction flood = Transaction.parseFrom(retFlood(BUDGET + 1));
+    AtomicInteger delivered = new AtomicInteger();
+    AtomicInteger halfClosed = new AtomicInteger();
+    ServerMethodDefinition<Transaction, GrpcAPI.Return> guarded = GuardedRequestMarshaller.guard(
+        ServerMethodDefinition.create(WalletGrpc.getBroadcastTransactionMethod(),
+            (call, headers) -> new ServerCall.Listener<Transaction>() {
+              @Override
+              public void onMessage(Transaction message) {
+                delivered.incrementAndGet();
+              }
+
+              @Override
+              public void onHalfClose() {
+                halfClosed.incrementAndGet();
+              }
+            }), MAX_MESSAGE, BUDGET);
+    GuardedRequestMarshaller<Transaction> marshaller =
+        (GuardedRequestMarshaller<Transaction>) guarded.getMethodDescriptor()
+            .getRequestMarshaller();
+    // The transport no longer delivers a second message of a unary call, so drive the listener
+    // directly.
+    CommonParameter parameter = CommonParameter.getInstance();
+    boolean metrics = parameter.metricsPrometheusEnable;
+    parameter.metricsPrometheusEnable = true;
+    try {
+      String name = WalletGrpc.getBroadcastTransactionMethod().getFullMethodName();
+      for (Transaction[] messages : new Transaction[][] {
+          {flood, legitimate()}, {legitimate(), flood}, {flood, flood}}) {
+        double rejected = rejections(name, Reason.OVER_BUDGET);
+        int deliveredBefore = delivered.get();
+        ServerCall<Transaction, GrpcAPI.Return> call = Mockito.mock(ServerCall.class);
+        Mockito.when(call.getMethodDescriptor()).thenReturn(guarded.getMethodDescriptor());
+        Mockito.when(call.getAttributes()).thenReturn(Attributes.EMPTY);
+        ServerCall.Listener<Transaction> listener =
+            guarded.getServerCallHandler().startCall(call, new Metadata());
+        for (Transaction message : messages) {
+          listener.onMessage(marshaller.parse(new ByteArrayInputStream(message.toByteArray())));
+        }
+        listener.onHalfClose();
+
+        ArgumentCaptor<Status> status = ArgumentCaptor.forClass(Status.class);
+        Mockito.verify(call).close(status.capture(), Mockito.any(Metadata.class));
+        assertEquals(Status.Code.INVALID_ARGUMENT, status.getValue().getCode());
+        assertEquals(messages[0] == flood ? 0 : 1, delivered.get() - deliveredBefore);
+        assertEquals(0, halfClosed.get());
+        assertEquals(rejected + 1, rejections(name, Reason.OVER_BUDGET), 0);
+      }
+    } finally {
+      parameter.metricsPrometheusEnable = metrics;
+    }
   }
 
   @Test
@@ -491,6 +550,11 @@ public class RpcServiceAdmissionTest {
     registry.register(new CorruptGzip());
     ManagedChannel corruptChannel = NettyChannelBuilder.forAddress("127.0.0.1", server.getPort())
         .usePlaintext().compressorRegistry(registry).build();
+    CompressorRegistry badHeaderRegistry = CompressorRegistry.newEmptyInstance();
+    badHeaderRegistry.register(new CorruptGzip(new byte[] {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}));
+    ManagedChannel badHeaderChannel = NettyChannelBuilder
+        .forAddress("127.0.0.1", server.getPort())
+        .usePlaintext().compressorRegistry(badHeaderRegistry).build();
     try {
       int before = HANDLER_CALLS.get();
       int severeBefore = GRPC_SEVERE.size();
@@ -503,16 +567,20 @@ public class RpcServiceAdmissionTest {
       // Valid gzip header, invalid deflate data.
       assertEquals(Status.Code.INVALID_ARGUMENT,
           rawBytesCall(corruptChannel, legitimate().toByteArray(), "gzip").getCode());
+      // Invalid gzip header: decompression starts in the marshaller, so it is rejected there.
+      assertEquals(Status.Code.INVALID_ARGUMENT,
+          rawBytesCall(badHeaderChannel, legitimate().toByteArray(), "gzip").getCode());
 
       assertEquals(before, HANDLER_CALLS.get());
       assertEquals(Arrays.asList(Status.Code.INVALID_ARGUMENT, Status.Code.INVALID_ARGUMENT,
-          Status.Code.INVALID_ARGUMENT), CLOSED_WITH);
+          Status.Code.INVALID_ARGUMENT, Status.Code.INVALID_ARGUMENT), CLOSED_WITH);
       awaitTrue(() -> STARTED.get() == FINISHED.get());
       Thread.sleep(500);
       assertEquals(severeBefore, GRPC_SEVERE.size());
       assertTrue(stub().broadcastTransaction(legitimate()).getResult());
     } finally {
       corruptChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+      badHeaderChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
     }
   }
 
@@ -596,10 +664,12 @@ public class RpcServiceAdmissionTest {
     return Transaction.newBuilder().addSignature(ByteString.copyFrom(new byte[65])).build();
   }
 
-  private static Status rawUnaryCall(List<Transaction> messages) throws Exception {
+  private static Status rawUnaryCall(List<Transaction> messages, String compression)
+      throws Exception {
     ClientCall<Transaction, GrpcAPI.Return> call = channel.newCall(
         WalletGrpc.getBroadcastTransactionMethod(),
-        CallOptions.DEFAULT.withDeadlineAfter(DEADLINE_SECONDS, TimeUnit.SECONDS));
+        CallOptions.DEFAULT.withDeadlineAfter(DEADLINE_SECONDS, TimeUnit.SECONDS)
+            .withCompression(compression));
     CompletableFuture<Status> closed = new CompletableFuture<>();
     call.start(new ClientCall.Listener<GrpcAPI.Return>() {
       @Override
@@ -646,8 +716,22 @@ public class RpcServiceAdmissionTest {
     }
   }
 
-  /** Writes a valid gzip header followed by deflate data with an invalid block type. */
+  /** Writes fixed bytes in place of the compressed message. */
   private static final class CorruptGzip implements Compressor {
+
+    // A valid gzip header followed by deflate data with an invalid block type.
+    private static final byte[] INVALID_DEFLATE = {0x1f, (byte) 0x8b, 8, 0, 0, 0, 0, 0, 0,
+        (byte) 0xff, (byte) 0xff, (byte) 0xff, 0, 0};
+
+    private final byte[] payload;
+
+    CorruptGzip() {
+      this(INVALID_DEFLATE);
+    }
+
+    CorruptGzip(byte[] payload) {
+      this.payload = payload;
+    }
 
     @Override
     public String getMessageEncoding() {
@@ -667,8 +751,7 @@ public class RpcServiceAdmissionTest {
 
         @Override
         public void close() throws IOException {
-          out.write(new byte[] {0x1f, (byte) 0x8b, 8, 0, 0, 0, 0, 0, 0, (byte) 0xff,
-              (byte) 0xff, (byte) 0xff, 0, 0});
+          out.write(payload);
           super.close();
         }
       };
